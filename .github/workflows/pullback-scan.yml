@@ -55,6 +55,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # === 新增：從共享倉庫拉取股票池 ===
+      - name: Pull shared universe data
+        uses: actions/checkout@v4
+        with:
+          repository: cybergpxsee/data-share
+          path: .tmp/shared-universe
+          fetch-depth: 1
+          # 如果倉庫是私有的，請取消註解並設定 secret：
+          # token: ${{ secrets.PAT_FOR_DATA_SHARE }}
+
+      - name: Copy universe files to local data/universe
+        run: |
+          mkdir -p data/universe
+          cp -r .tmp/shared-universe/data/universe/* data/universe/
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -66,13 +81,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Ensure local universe cache exists
-        shell: bash
-        run: |
-          if [ ! -f data/universe/nasdaqlisted.txt ] || [ ! -f data/universe/otherlisted.txt ] || [ ! -f data/universe/us_symbols.csv ] || [ ! -f data/universe/monthly_excluded_symbols.json ]; then
-            echo 'Local universe cache missing; refreshing once before scan.'
-            python scripts/update_symbol_universe.py
-          fi
+      # === 已移除 Ensure local universe cache exists 步驟（現由共享倉庫提供） ===
 
       - name: Run scan
         env:
