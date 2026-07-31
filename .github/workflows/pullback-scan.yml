@@ -1,0 +1,115 @@
+name: pullback-scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_symbols:
+        description: 'Optional cap for smoke test; leave empty for full universe'
+        required: false
+        default: ''
+      stage1_period:
+        description: 'Stage1 liquidity lookback'
+        required: false
+        default: '1mo'
+      stage1_batch:
+        description: 'Stage1 batch size'
+        required: false
+        default: '120'
+      stage2_batch:
+        description: 'Stage2 batch size'
+        required: false
+        default: '100'
+      stage2_period:
+        description: 'Stage2 deep-history lookback (e.g., 1y for 52-week high/low)'
+        required: false
+        default: '1y'
+      universe_shards:
+        description: 'Shard count before workers start'
+        required: false
+        default: '18'
+      worker_concurrency:
+        description: 'How many workers to run in parallel'
+        required: false
+        default: '6'
+      worker_stagger:
+        description: 'Seconds to stagger worker launches'
+        required: false
+        default: '0.5'
+  
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      PYTHONUNBUFFERED: '1'
+      HERMES_SCAN_MAX_SYMBOLS: ${{ github.event.inputs.max_symbols || '' }}
+      HERMES_SCAN_STAGE1_PERIOD: ${{ github.event.inputs.stage1_period || '1mo' }}
+      HERMES_SCAN_STAGE1_BATCH: ${{ github.event.inputs.stage1_batch || '120' }}
+      HERMES_SCAN_STAGE2_BATCH: ${{ github.event.inputs.stage2_batch || '100' }}
+      HERMES_SCAN_UNIVERSE_SHARDS: ${{ github.event.inputs.universe_shards || '12' }}
+      HERMES_SCAN_WORKER_CONCURRENCY: ${{ github.event.inputs.worker_concurrency || '3' }}
+      HERMES_SCAN_WORKER_STAGGER: ${{ github.event.inputs.worker_stagger || '1' }}
+      HERMES_SCAN_STAGE2_SHARDS_PER_WORKER: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Ensure local universe cache exists
+        shell: bash
+        run: |
+          if [ ! -f data/universe/nasdaqlisted.txt ] || [ ! -f data/universe/otherlisted.txt ] || [ ! -f data/universe/us_symbols.csv ] || [ ! -f data/universe/monthly_excluded_symbols.json ]; then
+            echo 'Local universe cache missing; refreshing once before scan.'
+            python scripts/update_symbol_universe.py
+          fi
+
+      - name: Run scan
+        env:
+          HERMES_SCAN_STAGE2_PERIOD: ${{ github.event.inputs.stage2_period || '1y' }}
+        run: bash scripts/run_scan.sh
+
+      - name: Upload output artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pullback-scan-${{ github.run_id }}
+          path: output/
+          if-no-files-found: error
+
+      - name: Append latest markdown to job summary
+        shell: bash
+        run: |
+          latest_md=$(find output -name 'pullback_scan.md' | sort | tail -n 1)
+          echo '## Latest report' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          cat "$latest_md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate Discord embed payload
+        run: |
+          latest_json=$(find output -name 'pullback_scan.json' | sort | tail -n 1)
+          python scripts/render_discord.py "$latest_json" output/
+
+      - name: Upload Discord payload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-payload-${{ github.run_id }}
+          path: output/discord_embed_*.json
+          if-no-files-found: warn
+
+      - name: Send Discord embed
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        if: success() && env.DISCORD_WEBHOOK_URL != ''
+        run: |
+          payload=$(find output -name 'discord_embed_*.json' | sort | tail -n 1)
+          python scripts/post_to_discord.py "$payload"
