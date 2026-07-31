@@ -1,0 +1,57 @@
+# config.yaml
+# US Pullback Scanner Configuration
+# All hardcoded thresholds moved here for easy tuning
+
+# Liquidity thresholds
+liquidity:
+  min_avg_dollar_volume_20d: 20000000      # $20M minimum for candidate inclusion
+  band_high: 50000000                       # $50M threshold for high liquidity band
+  smallcap_avg_dollar_volume_30d: 15000000  # $15M for small cap filter
+
+# Pullback filter parameters
+pullback:
+  direction_filter_days: 5
+  direction_filter_min_pct: 1.0
+  min_close_position_pct: 0.40
+
+# Scan pattern parameters
+scan:
+  swing_window: 3
+  short_trend_lookback: 30
+  long_trend_lookback: 90
+  long_term_trend_bonus: 5
+  min_double_structure_gap: 20
+  double_structure_wide_gap_bonus: 5
+  double_structure_wide_gap_threshold: 60
+  direction_filter_days: 5
+  direction_filter_min_pct: 1.0
+  week52_lookback: 252
+  week52_proximity_bonus_max: 15
+  pullback_20d_filter: true
+  max_confirmation_age_days: 90    # Maximum days since confirmation
+
+# Download parameters
+download:
+  batch_size_stage1: 120
+  batch_size_stage2: 100
+  timeout: 45
+  retry_count: 3
+  retry_delay_base: 0.8
+
+# Universe parameters
+universe:
+  smallcap_avg_dollar_volume_30d: 15000000
+  cache_fresh_days: 25
+  shard_count: 18
+
+# Cache parameters
+cache:
+  bars_dir: ".cache/bars"
+  max_age_days: 30
+  enabled: true
+
+# Logging
+logging:
+  level: "INFO"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
