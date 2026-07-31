@@ -24,25 +24,9 @@ SWING_WINDOW = 3
 SHORT_TREND_LOOKBACK = 30
 LONG_TREND_LOOKBACK = 90
 LONG_TERM_TREND_BONUS = 5
-MIN_DOUBLE_STRUCTURE_GAP = 20
-DOUBLE_STRUCTURE_WIDE_GAP_BONUS = 5
-DOUBLE_STRUCTURE_WIDE_GAP_THRESHOLD = 60
+LONG_SPAN_BONUS = 8
 DIRECTION_FILTER_DAYS = 5
 DIRECTION_FILTER_MIN_PCT = 1.0
-
-# 新增：52週高低位評分權重
-WEEK52_PROXIMITY_BONUS_MAX = 15  # 52週高低位接近度最大加分
-WEEK52_LOOKBACK = 252  # 52週交易日數
-
-# 新增：20日均線過濾條件
-PULLBACK_20D_FILTER = True  # 是否啟用20日均線過濾
-
-# 新增：52週高低位評分權重
-WEEK52_PROXIMITY_BONUS_MAX = 15  # 52週高低位接近度最大加分
-WEEK52_LOOKBACK = 252  # 52週交易日數
-
-# 新增：20日均線過濾條件
-PULLBACK_20D_FILTER = True  # 是否啟用20日均線過濾
 
 
 def _hard_timeout_handler(signum, frame):
@@ -201,7 +185,7 @@ def append_log(stderr_path: str, message: str):
         f.write(f"[{ts}] {message}\n")
 
 
-def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
+def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD', interval='1d', prepost=False):
     frames = []
     misses = set()
     total_batches = max(1, math.ceil(len(symbols) / batch)) if symbols else 0
@@ -209,7 +193,7 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
         batch_start = time.time()
         append_log(
             stderr_path,
-            f"{phase}_BATCH_START period={period} batch={group_idx}/{total_batches} size={len(group)} accumulated_ok={len(frames)} accumulated_miss={len(misses)}"
+            f"{phase}_BATCH_START period={period} interval={interval} batch={group_idx}/{total_batches} size={len(group)} accumulated_ok={len(frames)} accumulated_miss={len(misses)}"
         )
         tickers = ' '.join(group)
         time.sleep(0.35 + random.uniform(0.0, 0.55))
@@ -222,12 +206,12 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
                     lambda: yf.download(
                         tickers=tickers,
                         period=period,
-                        interval='1d',
+                        interval=interval,
                         auto_adjust=False,
                         group_by='ticker',
                         progress=False,
                         threads=False,
-                        prepost=False,
+                        prepost=prepost,
                         timeout=30,
                     )
                 )
@@ -239,14 +223,14 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
             wait_s = 0.8 * attempt + random.uniform(0.6, 1.8)
             append_log(
                 stderr_path,
-                f"{phase}_RETRY period={period} batch={group_idx}/{total_batches} attempt={attempt} size={len(group)} wait={wait_s:.2f}s error={last_error}"
+                f"{phase}_RETRY period={period} interval={interval} batch={group_idx}/{total_batches} attempt={attempt} size={len(group)} wait={wait_s:.2f}s error={last_error}"
             )
             if attempt < 3:
                 time.sleep(wait_s)
         if data is None or len(data) == 0:
             append_log(
                 stderr_path,
-                f"{phase}_ERROR period={period} batch={group_idx}/{total_batches} sample={group[:5]} error={last_error}"
+                f"{phase}_ERROR period={period} interval={interval} batch={group_idx}/{total_batches} sample={group[:5]} error={last_error}"
             )
             misses.update(group)
             continue
@@ -293,25 +277,209 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
         elapsed = time.time() - batch_start
         append_log(
             stderr_path,
-            f"{phase}_BATCH_DONE period={period} batch={group_idx}/{total_batches} size={len(group)} ok={batch_ok} miss={batch_miss} cumulative_ok={len(frames)} cumulative_miss={len(misses)} elapsed={elapsed:.2f}s"
+            f"{phase}_BATCH_DONE period={period} interval={interval} batch={group_idx}/{total_batches} size={len(group)} ok={batch_ok} miss={batch_miss} cumulative_ok={len(frames)} cumulative_miss={len(misses)} elapsed={elapsed:.2f}s"
         )
         time.sleep(0.15)
     out = {}
     for sym, df in frames:
-        cols = {c.lower(): c for c in df.columns}
-        needed = [cols.get('date'), cols.get('open'), cols.get('high'), cols.get('low'), cols.get('close'), cols.get('volume')]
+        cols = {str(c).lower(): c for c in df.columns}
+        date_col = None
+        for candidate in ('date', 'datetime', 'timestamp'):
+            if candidate in cols:
+                date_col = cols[candidate]
+                break
+        needed = [date_col, cols.get('open'), cols.get('high'), cols.get('low'), cols.get('close'), cols.get('volume')]
         if any(c is None for c in needed):
             misses.add(sym)
             continue
-        sdf = df[[cols['date'], cols['open'], cols['high'], cols['low'], cols['close'], cols['volume']]].copy()
+        sdf = df[[date_col, cols['open'], cols['high'], cols['low'], cols['close'], cols['volume']]].copy()
         sdf.columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
+        sdf['Date'] = pd.to_datetime(sdf['Date'], utc=True, errors='coerce').dt.tz_localize(None)
         sdf = sdf.dropna(subset=['Date']).sort_values('Date')
         if len(sdf) == 0 or sdf[['Open','High','Low','Close']].dropna(how='all').empty:
             misses.add(sym)
             continue
-        sdf['Date'] = pd.to_datetime(sdf['Date']).dt.tz_localize(None)
         out[sym] = sdf.reset_index(drop=True)
+        misses.discard(sym)
     return out, misses
+
+
+def default_intraday_30m_signal(signal_type: str = '無訊號') -> dict:
+    return {
+        'has_30m_signal': False,
+        'signal_type': signal_type,
+        'signal_priority': 0,
+        'signal_time': None,
+        'signal_detail': '',
+    }
+
+
+def analyze_intraday_30m_buy_signal(df30: pd.DataFrame, pullback_date: str | None = None) -> dict:
+    result = default_intraday_30m_signal()
+    if df30 is None or len(df30) < 12:
+        return result
+
+    x = df30.copy().dropna(subset=['Open', 'High', 'Low', 'Close']).reset_index(drop=True)
+    if len(x) < 12:
+        return result
+    if pullback_date:
+        try:
+            cutoff = pd.Timestamp(str(pullback_date))
+            x = x[x['Date'] >= cutoff].reset_index(drop=True)
+        except Exception:
+            pass
+    if len(x) < 12:
+        return result
+
+    best = None
+    for i in range(6, len(x)):
+        base = x.iloc[max(0, i - 6):i]
+        if len(base) < 4:
+            continue
+        prev_low = float(base['Low'].min())
+        prev_high = float(base['High'].max())
+        low_i = float(x.iloc[i]['Low'])
+        close_i = float(x.iloc[i]['Close'])
+
+        # 30m 破底翻後回前高
+        if low_i < prev_low * 0.998 and close_i >= prev_low:
+            trigger_high = max(prev_high, float(x.iloc[i]['High']))
+            for j in range(i, min(len(x), i + 7)):
+                close_j = float(x.iloc[j]['Close'])
+                if close_j >= trigger_high * 0.998:
+                    cand = {
+                        'has_30m_signal': True,
+                        'signal_type': '30m破底翻回前高',
+                        'signal_priority': 2,
+                        'signal_time': pd.Timestamp(x.iloc[j]['Date']).strftime('%Y-%m-%d %H:%M'),
+                        'signal_detail': f'30m低點跌破前低後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 收回前高 {trigger_high:.2f}',
+                    }
+                    best = cand if best is None or cand['signal_priority'] > best['signal_priority'] else best
+                    break
+
+        # 30m 震倉後回前高
+        body_low = min(float(x.iloc[i]['Open']), close_i)
+        wick_ratio = ((body_low - low_i) / body_low) if body_low > 0 else 0.0
+        if low_i < prev_low * 0.997 and wick_ratio >= 0.003:
+            for j in range(i, min(len(x), i + 9)):
+                close_j = float(x.iloc[j]['Close'])
+                if close_j >= prev_high * 0.998:
+                    cand = {
+                        'has_30m_signal': True,
+                        'signal_type': '30m震倉後回前高',
+                        'signal_priority': 1,
+                        'signal_time': pd.Timestamp(x.iloc[j]['Date']).strftime('%Y-%m-%d %H:%M'),
+                        'signal_detail': f'30m震倉下插後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 收回前高 {prev_high:.2f}',
+                    }
+                    if best is None or cand['signal_priority'] > best['signal_priority']:
+                        best = cand
+                    break
+
+    return best or result
+
+
+def analyze_intraday_30m_short_signal(df30: pd.DataFrame, pullback_date: str | None = None) -> dict:
+    result = default_intraday_30m_signal()
+    if df30 is None or len(df30) < 12:
+        return result
+
+    x = df30.copy().dropna(subset=['Open', 'High', 'Low', 'Close']).reset_index(drop=True)
+    if len(x) < 12:
+        return result
+    if pullback_date:
+        try:
+            cutoff = pd.Timestamp(str(pullback_date))
+            x = x[x['Date'] >= cutoff].reset_index(drop=True)
+        except Exception:
+            pass
+    if len(x) < 12:
+        return result
+
+    best = None
+    for i in range(6, len(x)):
+        base = x.iloc[max(0, i - 6):i]
+        if len(base) < 4:
+            continue
+        prev_low = float(base['Low'].min())
+        prev_high = float(base['High'].max())
+        high_i = float(x.iloc[i]['High'])
+        close_i = float(x.iloc[i]['Close'])
+
+        # 30m 假突破後回前低
+        if high_i > prev_high * 1.002 and close_i <= prev_high:
+            trigger_low = min(prev_low, float(x.iloc[i]['Low']))
+            for j in range(i, min(len(x), i + 7)):
+                close_j = float(x.iloc[j]['Close'])
+                if close_j <= trigger_low * 1.002:
+                    cand = {
+                        'has_30m_signal': True,
+                        'signal_type': '30m假突破回前低',
+                        'signal_priority': 2,
+                        'signal_time': pd.Timestamp(x.iloc[j]['Date']).strftime('%Y-%m-%d %H:%M'),
+                        'signal_detail': f'30m高點假突破前高後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 跌回前低 {trigger_low:.2f}',
+                    }
+                    best = cand if best is None or cand['signal_priority'] > best['signal_priority'] else best
+                    break
+
+        # 30m 上插震倉後回前低
+        body_high = max(float(x.iloc[i]['Open']), close_i)
+        wick_ratio = ((high_i - body_high) / body_high) if body_high > 0 else 0.0
+        if high_i > prev_high * 1.003 and wick_ratio >= 0.003:
+            for j in range(i, min(len(x), i + 9)):
+                close_j = float(x.iloc[j]['Close'])
+                if close_j <= prev_low * 1.002:
+                    cand = {
+                        'has_30m_signal': True,
+                        'signal_type': '30m上插震倉後回前低',
+                        'signal_priority': 1,
+                        'signal_time': pd.Timestamp(x.iloc[j]['Date']).strftime('%Y-%m-%d %H:%M'),
+                        'signal_detail': f'30m上插震倉後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 跌回前低 {prev_low:.2f}',
+                    }
+                    if best is None or cand['signal_priority'] > best['signal_priority']:
+                        best = cand
+                    break
+
+    return best or result
+
+
+def enrich_rows_with_intraday_30m(rows: list[dict], stderr_path: str) -> list[dict]:
+    if not rows:
+        return rows
+    symbol_map = {yahoo_symbol(str(row['symbol'])): row for row in rows if row.get('direction') in {'做多', '做空'}}
+    if not symbol_map:
+        return rows
+    intraday, misses = download_bars(
+        list(symbol_map.keys()),
+        '1mo',
+        stderr_path,
+        batch=20,
+        phase='INTRADAY30M',
+        interval='30m',
+        prepost=False,
+    )
+    append_log(stderr_path, f"INTRADAY30M_DONE ok={len(intraday)} miss={len(misses)}")
+    kept_rows = []
+    for ys, row in symbol_map.items():
+        df30 = intraday.get(ys)
+        if df30 is None:
+            signal = default_intraday_30m_signal('無數據')
+        elif row.get('direction') == '做空':
+            signal = analyze_intraday_30m_short_signal(df30, pullback_date=row.get('pullback_date'))
+        else:
+            signal = analyze_intraday_30m_buy_signal(df30, pullback_date=row.get('pullback_date'))
+        row['intraday_30m_signal'] = signal
+        row['intraday_30m_status'] = '有' if signal.get('has_30m_signal') else '無'
+        row['intraday_30m_signal_time'] = signal.get('signal_time')
+        row['intraday_30m_priority'] = int(signal.get('signal_priority', 0) or 0)
+        row['intraday_30m_detail'] = signal.get('signal_detail', '')
+        if signal.get('has_30m_signal'):
+            row['score'] = round(float(row.get('score', 0.0)) + 18 + signal['signal_priority'] * 6, 1)
+        needs_intraday_reversal = bool(row.get('needs_intraday_reversal'))
+        if needs_intraday_reversal and not signal.get('has_30m_signal'):
+            continue
+        kept_rows.append(row)
+    rows[:] = kept_rows
+    return rows
 
 
 def local_extrema(df: pd.DataFrame, kind: str, lookback=90, window=SWING_WINDOW):
@@ -426,12 +594,11 @@ def filter_recent_windows_by_direction(df, windows, bullish=True, days=DIRECTION
         liquidity_band = liquidity_band_from_avg_dollar_volume(avg_dollar_volume)
         if not liquidity_band:
             continue
-        if passes_direction_filter_on_idx(df, idx, bullish=bullish, days=days, min_pct=min_pct):
-            new_w = dict(w)
-            avg_dollar_volume_val = float(avg_dollar_volume if avg_dollar_volume is not None else 0.0)
-            new_w['avg_20d_dollar_volume'] = round(avg_dollar_volume_val, 2)
-            new_w['liquidity_band'] = liquidity_band
-            filtered.append(new_w)
+        new_w = dict(w)
+        avg_dollar_volume_val = float(avg_dollar_volume if avg_dollar_volume is not None else 0.0)
+        new_w['avg_20d_dollar_volume'] = round(avg_dollar_volume_val, 2)
+        new_w['liquidity_band'] = liquidity_band
+        filtered.append(new_w)
     return filtered
 
 
@@ -681,108 +848,40 @@ def pct_diff(a, b):
     return abs(a-b)/denom if denom else 999
 
 
-def get_week52_high_low(df, idx, lookback=WEEK52_LOOKBACK):
-    """獲取過去52週的最高價和最低價"""
-    start = max(0, idx - lookback + 1)
-    seg = df.iloc[start:idx+1]
-    if len(seg) < 20:  # 至少需要20天數據
-        return None, None
-    high52 = float(seg['High'].max())
-    low52 = float(seg['Low'].min())
-    return high52, low52
-
-
-def calc_week52_proximity_bonus_long(df, pullback_idx):
-    """做多：回調位置越接近52週最低位，加分越高"""
-    if not PULLBACK_20D_FILTER and not WEEK52_PROXIMITY_BONUS_MAX:
-        return 0
-    high52, low52 = get_week52_high_low(df, pullback_idx)
-    if low52 is None:
-        return 0
-    close = float(df.iloc[pullback_idx]['Close'])
-    # 計算接近度：(close - low52) / (high52 - low52) * 100%
-    # 越接近low52（即比例越小），分數越高
-    if high52 == low52:
-        return 0
-    proximity = (close - low52) / (high52 - low52)
-    # proximity 在 [0, 1] 之間，越接近0(接近low52)分數越高
-    bonus = WEEK52_PROXIMITY_BONUS_MAX * (1 - proximity)
-    return max(0, round(bonus, 1))
-
-
-def calc_week52_proximity_bonus_short(df, pullback_idx):
-    """做空：回抽位置越接近52週最高位，加分越高"""
-    if not PULLBACK_20D_FILTER and not WEEK52_PROXIMITY_BONUS_MAX:
-        return 0
-    high52, low52 = get_week52_high_low(df, pullback_idx)
-    if high52 is None:
-        return 0
-    close = float(df.iloc[pullback_idx]['Close'])
-    if high52 == low52:
-        return 0
-    proximity = (high52 - close) / (high52 - low52)
-    # proximity 在 [0, 1] 之間，越接近0(接近high52)分數越高
-    bonus = WEEK52_PROXIMITY_BONUS_MAX * (1 - proximity)
-    return max(0, round(bonus, 1))
-
-
-def check_pullback_20d_filter_long(df, pullback_idx):
-    """做多：回調日收盤價 >= 20個交易日前收盤價"""
-    if not PULLBACK_20D_FILTER:
-        return True
-    if pullback_idx < 20:
+def has_higher_high_between(df, left_idx, right_idx, ceiling):
+    if right_idx - left_idx <= 1:
         return False
-    close_today = float(df.iloc[pullback_idx]['Close'])
-    close_20d_ago = float(df.iloc[pullback_idx - 20]['Close'])
-    return close_today >= close_20d_ago
+    seg = df.iloc[left_idx + 1:right_idx]
+    if len(seg) == 0:
+        return False
+    return float(seg['High'].max()) > float(ceiling)
 
 
-def check_pullback_20d_filter_short(df, pullback_idx):
-    """做空：回抽日收盤價 <= 20個交易日前收盤價"""
-    if not PULLBACK_20D_FILTER:
-        return True
-    if pullback_idx < 20:
+def has_lower_low_between(df, left_idx, right_idx, floor):
+    if right_idx - left_idx <= 1:
         return False
-    close_today = float(df.iloc[pullback_idx]['Close'])
-    close_20d_ago = float(df.iloc[pullback_idx - 20]['Close'])
-    return close_today <= close_20d_ago
+    seg = df.iloc[left_idx + 1:right_idx]
+    if len(seg) == 0:
+        return False
+    return float(seg['Low'].min()) < float(floor)
 
 
-def pct_diff(a, b):
-    denom = (abs(a)+abs(b))/2.0
-    return abs(a-b)/denom if denom else 999
+def breaks_below_level_after(df, start_idx, level):
+    if start_idx >= len(df) - 1:
+        return False
+    seg = df.iloc[start_idx + 1:]
+    if len(seg) == 0:
+        return False
+    return float(seg['Low'].min()) < float(level)
 
 
-def valid_double_bottom_structure(sdf: pd.DataFrame, li: int, lj: int) -> bool:
-    if lj <= li:
+def breaks_above_level_after(df, start_idx, level):
+    if start_idx >= len(df) - 1:
         return False
-    if (lj - li) < MIN_DOUBLE_STRUCTURE_GAP:
+    seg = df.iloc[start_idx + 1:]
+    if len(seg) == 0:
         return False
-    middle = sdf.iloc[li+1:lj]
-    if len(middle) == 0:
-        return False
-    left_low = float(sdf.iloc[li]['Low'])
-    right_low = float(sdf.iloc[lj]['Low'])
-    threshold = min(left_low, right_low)
-    if float(middle['Low'].min()) < threshold:
-        return False
-    return True
-
-
-def valid_double_top_structure(sdf: pd.DataFrame, hi: int, hj: int) -> bool:
-    if hj <= hi:
-        return False
-    if (hj - hi) < MIN_DOUBLE_STRUCTURE_GAP:
-        return False
-    middle = sdf.iloc[hi+1:hj]
-    if len(middle) == 0:
-        return False
-    left_high = float(sdf.iloc[hi]['High'])
-    right_high = float(sdf.iloc[hj]['High'])
-    threshold = max(left_high, right_high)
-    if float(middle['High'].max()) > threshold:
-        return False
-    return True
+    return float(seg['High'].max()) > float(level)
 
 
 def make_result(symbol, direction, pattern, zone, event_date, confirm_date, pullback_date, price, fib618, volume_feature, slowdown_feature, score, logic, recent_windows=None):
@@ -805,6 +904,408 @@ def make_result(symbol, direction, pattern, zone, event_date, confirm_date, pull
         '_sort_event': event_date,
         '_sort_confirm': confirm_date,
     }
+
+
+def build_long_pullback_after_double_top(symbol, df, top1_idx, top2_idx, valley_idx):
+    top1_high = float(df.iloc[top1_idx]['High'])
+    top2_high = float(df.iloc[top2_idx]['High'])
+    valley_low = float(df.iloc[valley_idx]['Low'])
+    if valley_low >= top2_high:
+        return None
+    if has_higher_high_between(df, top1_idx, top2_idx, max(top1_high, top2_high)):
+        return None
+    if breaks_below_level_after(df, top2_idx, valley_low):
+        return None
+
+    fib50 = top2_high - 0.5 * (top2_high - valley_low)
+    fib618 = top2_high - 0.618 * (top2_high - valley_low)
+    if fib50 < fib618:
+        fib50, fib618 = fib618, fib50
+
+    recent_valley_search_end = min(len(df) - 1, top2_idx + 31)
+    if recent_valley_search_end - (top2_idx + 3) < 3:
+        return None
+
+    recent_valley_idx = min(range(top2_idx + 3, recent_valley_search_end), key=lambda idx: float(df.iloc[idx]['Low']))
+    recent_valley_low = float(df.iloc[recent_valley_idx]['Low'])
+    drop_pct = (top2_high / recent_valley_low - 1.0) * 100.0 if recent_valley_low > 0 else 0.0
+    if drop_pct < 12.0:
+        return None
+
+    chip_zone = find_chip_dense_zone(df, recent_valley_idx, lookback=30)
+    platform_zone = find_platform_zone(df['Close'], recent_valley_idx, direction='long')
+    best = None
+    pullback_candidates = []
+    double_top_mid = (top1_high + top2_high) / 2.0
+
+    for k in range(top2_idx + 5, min(len(df) - 1, top2_idx + 31)):
+        low = float(df.iloc[k]['Low'])
+        high = float(df.iloc[k]['High'])
+        close = float(df.iloc[k]['Close'])
+        if not (low <= float(df.iloc[k - 1]['Low']) and low <= float(df.iloc[k + 1]['Low'])):
+            continue
+
+        in_fib_zone = fib618 * 0.995 <= low <= fib50 * 1.005
+        if not in_fib_zone:
+            continue
+        if low <= valley_low * 1.002:
+            continue
+
+        touch_chip = False
+        chip_low = chip_high = chip_mid = None
+        if chip_zone:
+            chip_low, chip_high, chip_mid = chip_zone
+            touch_chip = (chip_low * 0.99 <= low <= chip_high * 1.01) or (chip_low * 0.99 <= close <= chip_high * 1.01)
+
+        touch_platform = False
+        platform_low = platform_high = None
+        if platform_zone:
+            platform_low, platform_high = platform_zone
+            touch_platform = (platform_low * 0.992 <= low <= platform_high * 1.008) or (platform_low * 0.992 <= close <= platform_high * 1.008)
+
+        touch_double_top_mid = abs(low / double_top_mid - 1.0) <= 0.03
+        touch_recent_drop_low = abs(low / recent_valley_low - 1.0) <= 0.005
+        support_count = sum(1 for flag in [touch_chip, touch_platform, touch_double_top_mid, touch_recent_drop_low] if flag)
+        if support_count == 0:
+            continue
+
+        rebound_follow_idx = None
+        trendline_break = None
+        for j in range(k + 1, min(len(df), k + 6)):
+            if float(df.iloc[j]['Close']) > float(df.iloc[j - 1]['High']):
+                trendline_break = find_recent_desc_trendline_break(df, j, lookback=SHORT_TREND_LOOKBACK, window=SWING_WINDOW)
+                if trendline_break is None:
+                    continue
+                rebound_follow_idx = j
+                break
+        daily_rebound_confirmed = rebound_follow_idx is not None
+        needs_intraday_reversal = rebound_follow_idx is None
+
+        vol20 = trailing_avg_dollar_volume(df, k, days=20) or 0.0
+        pullback_day_dv = float(df.iloc[k]['Close']) * float(df.iloc[k]['Volume'])
+        vol_shrink = vol20 > 0 and pullback_day_dv < vol20
+        above_20d_close = False
+        close_20d_ago = None
+        if k >= 20:
+            close_20d_ago = float(df.iloc[k - 20]['Close'])
+            above_20d_close = close > close_20d_ago * 1.01
+
+        decline_seg = df.iloc[top2_idx:k + 1]
+        slowdown = 0
+        if len(decline_seg) >= 4:
+            tail_seg = decline_seg.iloc[-3:]
+            head_seg = decline_seg.iloc[:-3]
+            if len(head_seg) >= 2:
+                if avg_body(tail_seg) < avg_body(head_seg) * 0.85:
+                    slowdown += 1
+                if avg_tr(tail_seg) < avg_tr(head_seg) * 0.90:
+                    slowdown += 1
+
+        entry_anchor_idx = rebound_follow_idx if rebound_follow_idx is not None else k
+        entry_price = max(float(df.iloc[entry_anchor_idx]['Close']), high)
+        if touch_chip and chip_low is not None:
+            stop_price = chip_low * 0.985
+        elif platform_low is not None:
+            stop_price = platform_low * 0.985
+        else:
+            stop_price = low * 0.985
+        risk = entry_price - stop_price
+        if risk <= 0:
+            continue
+
+        target1 = double_top_mid
+        if target1 <= entry_price:
+            target1 = max(top2_high, entry_price + max(risk * 1.2, entry_price * 0.03))
+        target2 = low + 1.618 * (top2_high - recent_valley_low)
+        if target2 <= target1:
+            target2 = max(target1 + risk, entry_price + 1.618 * risk)
+
+        bonus = 0.0
+        bonus += 12 if touch_chip else 0
+        bonus += 8 if touch_platform else 0
+        bonus += 6 if touch_double_top_mid else 0
+        bonus += 8 if in_fib_zone else 0
+        bonus += 6 if vol_shrink else 0
+        bonus += slowdown * 4
+        bonus += 5 if above_20d_close else 0
+        bonus += 4 if daily_rebound_confirmed and rebound_follow_idx - k <= 2 else 0
+        if (top2_idx - top1_idx) >= 60:
+            bonus += LONG_SPAN_BONUS
+        if needs_intraday_reversal:
+            bonus -= 3
+
+        zone_parts = [f"回踩 大升段0.5-0.618 ({fib50:.2f}/{fib618:.2f})"]
+        if touch_chip and chip_mid is not None:
+            zone_parts.append(f"籌碼密集區 {chip_low:.2f}-{chip_high:.2f} / 中軸 {chip_mid:.2f}")
+        if touch_platform and platform_low is not None and platform_high is not None:
+            zone_parts.append(f"平台區 {platform_low:.2f}-{platform_high:.2f}")
+        if touch_double_top_mid:
+            zone_parts.append(f"雙頂中軸 {double_top_mid:.2f}")
+        if above_20d_close and close_20d_ago is not None:
+            zone_parts.append(f"回調價高於20日前收市 {close_20d_ago:.2f}")
+
+        score = 52.0 + bonus + max(0.0, 10.0 - max(0, (top2_idx - top1_idx) - 20) * 0.15)
+        score += max(0.0, 10.0 - pct_diff(top1_high, top2_high) * 400.0)
+        candidate = make_result(
+            symbol=symbol,
+            direction='做多',
+            pattern='雙頂→右側回調買點',
+            zone=' / '.join(zone_parts),
+            event_date=df.iloc[valley_idx]['Date'],
+            confirm_date=df.iloc[entry_anchor_idx]['Date'],
+            pullback_date=df.iloc[k]['Date'],
+            price=df.iloc[-1]['Close'],
+            fib618=fib618,
+            volume_feature='回調量縮' if vol_shrink else '一般',
+            slowdown_feature='回調減速' if slowdown >= 1 else '回調正常',
+            score=score,
+            logic='先找雙頂，再以雙頂之間的主升段低點到第二頂高點量度回調；若第二頂後先出現一段明顯下跌，之後回踩0.5-0.618並靠近籌碼/平台，且1-5日內重新轉強，視作右側回調買點。',
+            recent_windows=[],
+        )
+        candidate.update({
+            'entry_price': round(float(entry_price), 2),
+            'double_top_1_date': df.iloc[top1_idx]['Date'].strftime('%Y-%m-%d'),
+            'double_top_2_date': df.iloc[top2_idx]['Date'].strftime('%Y-%m-%d'),
+            'double_top_mid': round(double_top_mid, 2),
+            'double_top_gap_days': int(top2_idx - top1_idx),
+            'valley_date': df.iloc[valley_idx]['Date'].strftime('%Y-%m-%d'),
+            'valley_low': round(valley_low, 2),
+            'recent_drop_date': df.iloc[recent_valley_idx]['Date'].strftime('%Y-%m-%d'),
+            'recent_drop_low': round(recent_valley_low, 2),
+            'trend_break_date': df.iloc[entry_anchor_idx]['Date'].strftime('%Y-%m-%d'),
+            'chip_zone_low': round(float(chip_low), 2) if chip_low is not None else None,
+            'chip_zone_high': round(float(chip_high), 2) if chip_high is not None else None,
+            'chip_zone_mid': round(float(chip_mid), 2) if chip_mid is not None else None,
+            'support_flags': {
+                'touch_chip': touch_chip,
+                'touch_platform': touch_platform,
+                'touch_double_top_mid': touch_double_top_mid,
+                'touch_recent_drop_low': touch_recent_drop_low,
+                'above_20d_close': above_20d_close,
+                'close_20d_ago': round(float(close_20d_ago), 2) if close_20d_ago is not None else None,
+                'support_count': support_count,
+                'fallback_mode': 'double_top_right_side_pullback',
+            },
+            'risk_reward_1': round(float((target1 - entry_price) / risk), 2) if target1 > entry_price else None,
+            'daily_rebound_confirmed': daily_rebound_confirmed,
+            'needs_intraday_reversal': needs_intraday_reversal,
+        })
+        pullback_candidates.append({'idx': k, 'price_level': low})
+        if best is None or candidate['score'] > best['score'] or (math.isclose(candidate['score'], best['score']) and candidate['_sort_pullback'] > best['_sort_pullback']):
+            best = candidate
+
+    if best is not None:
+        best['recent_windows'] = filter_recent_windows_by_direction(
+            df,
+            build_recent_windows(df, pullback_candidates, bullish=True, max_windows=3, max_gap_days=3),
+            bullish=True,
+            days=20,
+            min_pct=1.0,
+        )
+    return best
+
+
+def build_short_right_shoulder_after_double_bottom(symbol, df, low1_idx, low2_idx, peak_idx):
+    low1_price = float(df.iloc[low1_idx]['Low'])
+    low2_price = float(df.iloc[low2_idx]['Low'])
+    peak_high = float(df.iloc[peak_idx]['High'])
+    if peak_high <= low2_price:
+        return None
+    if has_lower_low_between(df, low1_idx, low2_idx, min(low1_price, low2_price)):
+        return None
+    if breaks_above_level_after(df, low2_idx, peak_high):
+        return None
+
+    fib50 = low2_price + 0.5 * (peak_high - low2_price)
+    fib618 = low2_price + 0.618 * (peak_high - low2_price)
+    if fib50 > fib618:
+        fib50, fib618 = fib618, fib50
+
+    recent_peak_search_end = min(len(df) - 1, low2_idx + 31)
+    if recent_peak_search_end - (low2_idx + 3) < 3:
+        return None
+
+    recent_peak_idx = max(range(low2_idx + 3, recent_peak_search_end), key=lambda idx: float(df.iloc[idx]['High']))
+    recent_peak_high = float(df.iloc[recent_peak_idx]['High'])
+    rise_pct = (recent_peak_high / low2_price - 1.0) * 100.0 if low2_price > 0 else 0.0
+    if rise_pct < 12.0:
+        return None
+
+    chip_zone = find_chip_dense_zone(df, recent_peak_idx, lookback=30)
+    platform_zone = find_platform_zone(df['Close'], recent_peak_idx, direction='short')
+    best = None
+    pullback_candidates = []
+    double_bottom_mid = (low1_price + low2_price) / 2.0
+
+    for k in range(low2_idx + 5, min(len(df) - 1, low2_idx + 31)):
+        high = float(df.iloc[k]['High'])
+        low = float(df.iloc[k]['Low'])
+        close = float(df.iloc[k]['Close'])
+        if not (high >= float(df.iloc[k - 1]['High']) and high >= float(df.iloc[k + 1]['High'])):
+            continue
+
+        in_fib_zone = fib50 * 0.995 <= high <= fib618 * 1.005
+        if not in_fib_zone:
+            continue
+        if high >= peak_high * 0.998:
+            continue
+
+        touch_chip = False
+        chip_low = chip_high = chip_mid = None
+        if chip_zone:
+            chip_low, chip_high, chip_mid = chip_zone
+            touch_chip = (chip_low * 0.99 <= high <= chip_high * 1.01) or (chip_low * 0.99 <= close <= chip_high * 1.01)
+
+        touch_platform = False
+        platform_low = platform_high = None
+        if platform_zone:
+            platform_low, platform_high = platform_zone
+            touch_platform = (platform_low * 0.992 <= high <= platform_high * 1.008) or (platform_low * 0.992 <= close <= platform_high * 1.008)
+
+        touch_double_bottom_mid = abs(high / double_bottom_mid - 1.0) <= 0.03
+        touch_recent_rally_high = abs(high / recent_peak_high - 1.0) <= 0.005
+        support_count = sum(1 for flag in [touch_chip, touch_platform, touch_double_bottom_mid, touch_recent_rally_high] if flag)
+        if support_count == 0:
+            continue
+
+        breakdown_follow_idx = None
+        trendline_break = None
+        for j in range(k + 1, min(len(df), k + 6)):
+            if float(df.iloc[j]['Close']) < float(df.iloc[j - 1]['Low']):
+                trendline_break = find_recent_asc_trendline_break(df, j, lookback=SHORT_TREND_LOOKBACK, window=SWING_WINDOW)
+                if trendline_break is None:
+                    continue
+                if float(df.iloc[j]['Close']) > trendline_break['line_value'] * 1.002:
+                    continue
+                breakdown_follow_idx = j
+                break
+        daily_breakdown_confirmed = breakdown_follow_idx is not None
+        needs_intraday_reversal = breakdown_follow_idx is None
+
+        vol20 = trailing_avg_dollar_volume(df, k, days=20) or 0.0
+        pullback_day_dv = float(df.iloc[k]['Close']) * float(df.iloc[k]['Volume'])
+        vol_shrink = vol20 > 0 and pullback_day_dv < vol20
+        below_20d_close = False
+        close_20d_ago = None
+        if k >= 20:
+            close_20d_ago = float(df.iloc[k - 20]['Close'])
+            below_20d_close = close < close_20d_ago * 0.99
+
+        rise_seg = df.iloc[low2_idx:k + 1]
+        slowdown = 0
+        if len(rise_seg) >= 4:
+            tail_seg = rise_seg.iloc[-3:]
+            head_seg = rise_seg.iloc[:-3]
+            if len(head_seg) >= 2:
+                if avg_body(tail_seg) < avg_body(head_seg) * 0.85:
+                    slowdown += 1
+                if avg_tr(tail_seg) < avg_tr(head_seg) * 0.90:
+                    slowdown += 1
+
+        entry_anchor_idx = breakdown_follow_idx if breakdown_follow_idx is not None else k
+        entry_price = min(float(df.iloc[entry_anchor_idx]['Close']), low)
+        if touch_chip and chip_high is not None:
+            stop_price = chip_high * 1.015
+        elif platform_high is not None:
+            stop_price = platform_high * 1.015
+        else:
+            stop_price = high * 1.015
+        risk = stop_price - entry_price
+        if risk <= 0:
+            continue
+
+        target1 = double_bottom_mid
+        if target1 >= entry_price:
+            target1 = min(low2_price, entry_price - max(risk * 1.2, entry_price * 0.03))
+        target2 = high - 1.618 * (high - low2_price)
+        if target2 >= target1:
+            target2 = min(target1 - risk, entry_price - 1.618 * risk)
+
+        bonus = 0.0
+        bonus += 12 if touch_chip else 0
+        bonus += 8 if touch_platform else 0
+        bonus += 6 if touch_double_bottom_mid else 0
+        bonus += 8 if in_fib_zone else 0
+        bonus += 6 if vol_shrink else 0
+        bonus += slowdown * 4
+        bonus += 5 if below_20d_close else 0
+        bonus += 4 if daily_breakdown_confirmed and breakdown_follow_idx - k <= 2 else 0
+        if (low2_idx - low1_idx) >= 60:
+            bonus += LONG_SPAN_BONUS
+        if needs_intraday_reversal:
+            bonus -= 3
+
+        zone_parts = [f"回抽 大跌段0.5-0.618 ({fib50:.2f}/{fib618:.2f})"]
+        if touch_chip and chip_mid is not None:
+            zone_parts.append(f"籌碼密集區 {chip_low:.2f}-{chip_high:.2f} / 中軸 {chip_mid:.2f}")
+        if touch_platform and platform_low is not None and platform_high is not None:
+            zone_parts.append(f"平台區 {platform_low:.2f}-{platform_high:.2f}")
+        if touch_double_bottom_mid:
+            zone_parts.append(f"雙底中軸 {double_bottom_mid:.2f}")
+        if below_20d_close and close_20d_ago is not None:
+            zone_parts.append(f"回抽價低於20日前收市 {close_20d_ago:.2f}")
+
+        score = 52.0 + bonus + max(0.0, 10.0 - max(0, (low2_idx - low1_idx) - 20) * 0.15)
+        score += max(0.0, 10.0 - pct_diff(low1_price, low2_price) * 400.0)
+        candidate = make_result(
+            symbol=symbol,
+            direction='做空',
+            pattern='雙底→右肩回調賣點',
+            zone=' / '.join(zone_parts),
+            event_date=df.iloc[peak_idx]['Date'],
+            confirm_date=df.iloc[entry_anchor_idx]['Date'],
+            pullback_date=df.iloc[k]['Date'],
+            price=df.iloc[-1]['Close'],
+            fib618=fib618,
+            volume_feature='回抽量縮' if vol_shrink else '一般',
+            slowdown_feature='回抽減速' if slowdown >= 1 else '回抽正常',
+            score=score,
+            logic='先找雙底，再以雙底之間的主要跌段高點到第二底低點量度回抽；若後續反彈只到0.5-0.618、靠近籌碼/平台且1-5日內重新跌破短升勢，視作右肩回調賣點。',
+            recent_windows=[],
+        )
+        candidate.update({
+            'entry_price': round(float(entry_price), 2),
+            'double_bottom_1_date': df.iloc[low1_idx]['Date'].strftime('%Y-%m-%d'),
+            'double_bottom_2_date': df.iloc[low2_idx]['Date'].strftime('%Y-%m-%d'),
+            'double_bottom_mid': round(double_bottom_mid, 2),
+            'double_bottom_gap_days': int(low2_idx - low1_idx),
+            'peak_date': df.iloc[peak_idx]['Date'].strftime('%Y-%m-%d'),
+            'peak_high': round(peak_high, 2),
+            'peak_low': round(float(df.iloc[peak_idx]['Low']), 2),
+            'breakout_date': df.iloc[recent_peak_idx]['Date'].strftime('%Y-%m-%d'),
+            'fake_breakdown_date': df.iloc[entry_anchor_idx]['Date'].strftime('%Y-%m-%d'),
+            'breakout_ref_low': round(low, 2),
+            'trend_break_date': df.iloc[entry_anchor_idx]['Date'].strftime('%Y-%m-%d'),
+            'chip_zone_low': round(float(chip_low), 2) if chip_low is not None else None,
+            'chip_zone_high': round(float(chip_high), 2) if chip_high is not None else None,
+            'chip_zone_mid': round(float(chip_mid), 2) if chip_mid is not None else None,
+            'support_flags': {
+                'touch_chip': touch_chip,
+                'touch_platform': touch_platform,
+                'touch_double_bottom_mid': touch_double_bottom_mid,
+                'touch_recent_rally_high': touch_recent_rally_high,
+                'below_20d_close': below_20d_close,
+                'close_20d_ago': round(float(close_20d_ago), 2) if close_20d_ago is not None else None,
+                'support_count': support_count,
+                'fallback_mode': 'double_bottom_right_shoulder',
+            },
+            'risk_reward_1': round(float((entry_price - target1) / risk), 2) if target1 < entry_price else None,
+            'daily_breakdown_confirmed': daily_breakdown_confirmed,
+            'needs_intraday_reversal': needs_intraday_reversal,
+        })
+        pullback_candidates.append({'idx': k, 'price_level': high})
+        if best is None or candidate['score'] > best['score'] or (math.isclose(candidate['score'], best['score']) and candidate['_sort_pullback'] > best['_sort_pullback']):
+            best = candidate
+
+    if best is not None:
+        best['recent_windows'] = filter_recent_windows_by_direction(
+            df,
+            build_recent_windows(df, pullback_candidates, bullish=False, max_windows=3, max_gap_days=3),
+            bullish=False,
+            days=20,
+            min_pct=1.0,
+        )
+    return best
 
 
 def build_recent_windows(df, points, bullish=True, max_windows=3, max_gap_days=3):
@@ -854,7 +1355,7 @@ def clone_row_for_liquidity_band(row, band_key):
 
 def render_markdown_report(out: dict) -> str:
     lines = []
-    lines.append("# 美股回调交易形态简报")
+    lines.append("# 美股雙頂→破底翻→回調買點簡報")
     lines.append("")
     miss_total = int(out.get('stage1_misses', 0)) + int(out.get('stage2_misses', 0))
     miss_note = f"；数据下载失败 {miss_total} 个" if miss_total else ""
@@ -869,13 +1370,13 @@ def render_markdown_report(out: dict) -> str:
     lines.append("")
     top10 = out.get('top10', []) or []
     if not top10:
-        lines.append("今日无符合‘确认后回调再介入’条件的标的。")
+        lines.append("今日無符合『雙頂後破底翻成立，再等 0.5-0.618 回調共振買點』條件的標的。")
         if out.get('stderr_log'):
             lines.append("")
             lines.append(f"日志：`{out['stderr_log']}`")
         return "\n".join(lines)
 
-    lines.append("| 代码 | 方向 | 形态 | 支撑/阻力区 | 母形态事件日 | 确认日 | 最近回调/回抽日 | 现价 | 0.618关键位 | 量能特征 | 减速特征 | 质量分 | 一句话逻辑 |")
+    lines.append("| 代码 | 方向 | 形态 | 支撑/阻力区 | 破底翻日 | 确认日 | 最近回调日 | 现价 | 0.618关键位 | 量能特征 | 减速特征 | 质量分 | 一句话逻辑 |")
     lines.append("|---|---|---|---|---|---|---|---:|---:|---|---|---:|---|")
 
     def display_pullback_dates(row: dict) -> str:
@@ -901,7 +1402,7 @@ def render_markdown_report(out: dict) -> str:
     lines.append(f"- 前10中量缩回踩/回抽共有 **{qty_shrink}** 个，说明不少候选属于缩量测试关键区的类型。")
     lines.append(f"- 前10中出现减速回调/减速回抽特征的共有 **{qty_slow}** 个，这类通常更接近理想二次介入结构。")
     lines.append(f"- 多头候选 **{len(long_top)}** 个，空头候选 **{len(short_top)}** 个，可用来判断当天偏风险偏好还是偏防守。")
-    lines.append("- 支撑/阻力区、筹码密集区中轴、0.618 位置均为日线近似计算，适合做盘后筛选，不替代盘中确认。")
+    lines.append("- 支撑/阻力区、筹码密集区中轴、0.5/0.618 位置均为日线近似计算，适合做盘后筛选，不替代盘中确认。")
     lines.append("- 若次日出现放量重新站上支撑/跌回阻力下方，通常比单纯到位但未确认的胜率更高。")
     return "\n".join(lines)
 
@@ -929,376 +1430,724 @@ def scan_stage2_dataset(stage2, mapped, stderr_path):
 
 
 def scan_long(symbol, df):
-    if len(df) < 140:
+    if len(df) < 90:
         return None
-    sdf, lows = local_extrema(df, 'low', 90, SWING_WINDOW)
+    df = df.copy().dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume']).reset_index(drop=True)
+    if len(df) < 90:
+        return None
+
+    pivot_window = SWING_WINDOW
+    pivot_lows = []
+    pivot_highs = []
+    for i in range(pivot_window, len(df) - pivot_window):
+        low_seg = df['Low'].iloc[i-pivot_window:i+pivot_window+1]
+        high_seg = df['High'].iloc[i-pivot_window:i+pivot_window+1]
+        if float(df.iloc[i]['Low']) == float(low_seg.min()) and int(low_seg.argmin()) == pivot_window:
+            pivot_lows.append(i)
+        if float(df.iloc[i]['High']) == float(high_seg.max()) and int(high_seg.argmax()) == pivot_window:
+            pivot_highs.append(i)
+
+    if len(pivot_highs) < 2 or len(pivot_lows) < 2:
+        return None
+
     candidates = []
-    all_window_points = []
-    base_offset = len(df) - len(sdf)
-    for i in range(len(lows)):
-        for j in range(i+1, len(lows)):
-            li, lj = lows[i], lows[j]
-            if not valid_double_bottom_structure(sdf, li, lj):
+    qualifying_pullbacks_all = []
+
+    for top2_idx in pivot_highs:
+        if top2_idx < 30 or top2_idx > len(df) - 10:
+            continue
+        top2_high = float(df.iloc[top2_idx]['High'])
+
+        top1_candidates = [
+            idx for idx in pivot_highs
+            if top2_idx - 80 <= idx <= top2_idx - 20
+            and pct_diff(float(df.iloc[idx]['High']), top2_high) <= 0.02
+        ]
+        if not top1_candidates:
+            continue
+        top1_idx = min(top1_candidates, key=lambda idx: abs((top2_idx - idx) - 15))
+        top1_high = float(df.iloc[top1_idx]['High'])
+        if has_higher_high_between(df, top1_idx, top2_idx, max(top1_high, top2_high)):
+            continue
+        double_top_mid = (top1_high + top2_high) / 2.0
+        double_top_gap = top2_idx - top1_idx
+
+        valley_candidates = [idx for idx in pivot_lows if top1_idx + 2 <= idx <= top2_idx - 2]
+        if not valley_candidates:
+            continue
+        valley_idx = min(valley_candidates, key=lambda idx: float(df.iloc[idx]['Low']))
+        valley_low = float(df.iloc[valley_idx]['Low'])
+        valley_high = float(df.iloc[valley_idx]['High'])
+        if breaks_below_level_after(df, top2_idx, valley_low):
+            continue
+
+        breakdown_idx = None
+        reclaim_idx = None
+        breakdown_ref_high = None
+        for j in range(top2_idx + 1, min(len(df) - 1, top2_idx + 26)):
+            low_j = float(df.iloc[j]['Low'])
+            close_j = float(df.iloc[j]['Close'])
+            if low_j > valley_low * 0.997:
                 continue
-            p1, p2 = float(sdf.iloc[li]['Low']), float(sdf.iloc[lj]['Low'])
-            if pct_diff(p1, p2) > 0.03:
-                continue
-            zone_low = min(p1, p2)
-            zone_high = max(p1, p2)
-            zone_mid = (zone_low + zone_high)/2.0
-            post = sdf.iloc[lj+1:].copy()
-            if len(post) < 8:
-                continue
-            breakdown_idx = None
-            breakdown_mag = None
-            for k in range(lj+1, len(sdf)):
-                low = float(sdf.iloc[k]['Low'])
-                close = float(sdf.iloc[k]['Close'])
-                break_price = min(low, close)
-                mag = (zone_low - break_price) / zone_low
-                if 0.005 <= mag <= 0.08:
-                    breakdown_idx = k
-                    breakdown_mag = mag
+            prev_body_low = min(float(df.iloc[j - 1]['Open']), float(df.iloc[j - 1]['Close']))
+            prev_body_high = max(float(df.iloc[j - 1]['Open']), float(df.iloc[j - 1]['Close']))
+            for r in range(j, min(len(df), j + 6)):
+                close_r = float(df.iloc[r]['Close'])
+                if close_r >= prev_body_low or close_r >= valley_low:
+                    breakdown_idx = j
+                    reclaim_idx = r
+                    breakdown_ref_high = prev_body_high
                     break
-            if breakdown_idx is None:
+            if breakdown_idx is not None:
+                break
+        if breakdown_idx is None or reclaim_idx is None:
+            fallback_candidate = build_long_pullback_after_double_top(symbol, df, top1_idx, top2_idx, valley_idx)
+            if fallback_candidate is not None:
+                candidates.append(fallback_candidate)
+            continue
+
+        confirm_idx = None
+        trendline_break = None
+        rise_start = reclaim_idx
+        rise_low = min(float(df.iloc[breakdown_idx]['Low']), float(df.iloc[reclaim_idx]['Low']))
+        for j in range(reclaim_idx + 2, min(len(df) - 3, reclaim_idx + 31)):
+            close_j = float(df.iloc[j]['Close'])
+            high_j = float(df.iloc[j]['High'])
+            rise_pct = (high_j / rise_low - 1.0) * 100.0 if rise_low > 0 else 0.0
+            if rise_pct < 6.0:
                 continue
-            confirm_idx = None
-            for k in range(breakdown_idx+1, len(sdf)):
-                close = float(sdf.iloc[k]['Close'])
-                if close >= zone_high:
-                    global_k = base_offset + k
-                    confirm_idx = k
-                    break
-            if confirm_idx is None:
-                continue
-            global_confirm = base_offset + confirm_idx
-            if global_confirm < len(df) - 30:
-                continue
-            trendline_break = find_recent_desc_trendline_break(df, global_confirm, lookback=SHORT_TREND_LOOKBACK, window=SWING_WINDOW)
+            trendline_break = find_recent_desc_trendline_break(df, j, lookback=SHORT_TREND_LOOKBACK, window=SWING_WINDOW)
             if trendline_break is None:
                 continue
-            long_term_trend_break = find_recent_desc_trendline_break(df, global_confirm, lookback=LONG_TREND_LOOKBACK, window=SWING_WINDOW)
-            # find recent pullback after confirm
-            post_conf = df.iloc[global_confirm+1:].copy()
-            if len(post_conf) < 3:
+            confirm_idx = j
+            break
+        if confirm_idx is None:
+            continue
+        if confirm_idx < len(df) - 35:
+            continue
+
+        long_term_trend_break = find_recent_desc_trendline_break(df, confirm_idx, lookback=LONG_TREND_LOOKBACK, window=SWING_WINDOW)
+
+        breakout_leg_low = rise_low
+        breakout_leg_high = float(df.iloc[confirm_idx]['High'])
+        if breakout_leg_high <= breakout_leg_low:
+            continue
+        fib50 = breakout_leg_high - 0.5 * (breakout_leg_high - breakout_leg_low)
+        fib618 = breakout_leg_high - 0.618 * (breakout_leg_high - breakout_leg_low)
+        if fib50 < fib618:
+            fib50, fib618 = fib618, fib50
+
+        best_pullback_idx = None
+        best_score = -1e9
+        best_zone_text = f"雙頂壓力 {double_top_mid:.2f}"
+        best_volume_feature = '一般'
+        best_slowdown_feature = '一般'
+        best_entry = None
+        best_stop = None
+        best_target1 = None
+        best_target2 = None
+        best_band_mid = None
+        best_chip_zone_low = None
+        best_chip_zone_high = None
+        best_support_flags = {}
+        pullback_candidates = []
+
+        chip_zone = find_chip_dense_zone(df, confirm_idx, lookback=30)
+        platform_zone = find_platform_zone(df['Close'], confirm_idx, direction='long')
+        breakout_vol20 = trailing_avg_dollar_volume(df, confirm_idx, days=20) or 0.0
+        breakout_day_dv = float(df.iloc[confirm_idx]['Close']) * float(df.iloc[confirm_idx]['Volume'])
+        breakout_volume_feature = '確認放量' if breakout_vol20 > 0 and breakout_day_dv > breakout_vol20 else '確認量平'
+
+        prior_high_idx = nearest_swing_high(df, reclaim_idx, max(reclaim_idx + 1, confirm_idx - 1))
+        prior_high = float(df.iloc[prior_high_idx]['High']) if prior_high_idx is not None else None
+        support_line = trendline_break['line_value'] if trendline_break is not None else None
+
+        post_confirm_high = breakout_leg_high
+        for k in range(confirm_idx + 2, len(df) - 1):
+            low = float(df.iloc[k]['Low'])
+            close = float(df.iloc[k]['Close'])
+            high = float(df.iloc[k]['High'])
+            post_confirm_high = max(post_confirm_high, high)
+
+            in_fib_zone = fib618 * 0.995 <= low <= fib50 * 1.002
+            fib_ok, fib_reclaimed = qualifies_reclaim_after_fib_break_long(df, fib618, k, max_days=5)
+            if not in_fib_zone and not fib_reclaimed:
                 continue
-            wave_low_idx = nearest_swing_low(df, max(0, global_confirm-20), global_confirm)
-            wave_high_idx = nearest_swing_high(df, global_confirm, len(df)-1)
-            if wave_low_idx is None or wave_high_idx is None or wave_high_idx <= wave_low_idx:
+            if not fib_ok:
                 continue
-            wave_low = float(df.iloc[wave_low_idx]['Low'])
-            wave_high = float(df.iloc[wave_high_idx]['High'])
-            fib618 = wave_high - 0.618 * (wave_high - wave_low)
-            recent_pullback = None
-            qualifying_pullbacks = []
-            best_bonus = -1e9
-            slowdown_feature = '一般'
-            volume_feature = '量平/放量'
-            zone_text = f"{zone_low:.2f}-{zone_high:.2f}"
-            chip_zone = find_chip_dense_zone(df, global_confirm, lookback=30)
-            for k in range(global_confirm+2, len(df)-1):
-                close = float(df.iloc[k]['Close'])
-                low = float(df.iloc[k]['Low'])
-                fib_ok, fib_reclaim = qualifies_reclaim_after_fib_break_long(df, fib618, k, max_days=5)
-                if not fib_ok:
-                    continue
-                touched_support = (zone_low * 0.985 <= low <= zone_high * 1.015)
-                touched_chip = False
-                if chip_zone:
-                    cl, ch, _ = chip_zone
-                    touched_chip = (cl*0.99 <= close <= ch*1.01) or (cl*0.99 <= low <= ch*1.01)
-                if not (touched_support or touched_chip):
-                    continue
-                # local pullback low (recent once)
-                if k+1 < len(df) and low <= float(df.iloc[k-1]['Low']) and low <= float(df.iloc[k+1]['Low']):
-                    rise_seg = df.iloc[global_confirm: max(global_confirm+1, min(wave_high_idx+1, k))]
-                    pb_seg = df.iloc[max(global_confirm+1, wave_high_idx):k+1] if wave_high_idx < k else df.iloc[global_confirm+1:k+1]
-                    slowdown = 0
-                    if len(rise_seg) >= 3 and len(pb_seg) >= 2:
-                        if avg_body(pb_seg) < avg_body(rise_seg) * 0.85:
-                            slowdown += 1
-                        if avg_tr(pb_seg) < avg_tr(rise_seg) * 0.9:
-                            slowdown += 1
-                    vol20 = float(df.iloc[max(0, k-20):k]['Volume'].mean()) if k > 0 else 0
-                    vol_shrink = vol20 > 0 and float(df.iloc[k]['Volume']) < vol20
-                    bonus = 0
-                    if touched_support:
-                        bonus += 8
-                    if touched_chip:
-                        bonus += 6
-                    if touched_support and touched_chip:
-                        bonus += 4
-                    if close >= fib618:
-                        bonus += 8
-                    elif low >= fib618 * 0.995:
-                        bonus += 5
-                    elif fib_reclaim:
-                        bonus += 4
-                    bonus += slowdown * 4
-                    if vol_shrink:
-                        bonus += 5
-                    qualifying_pullbacks.append({
-                        'idx': k,
-                        'price_level': low,
-                    })
-                    if bonus >= best_bonus or (recent_pullback is None or k > recent_pullback):
-                        best_bonus = bonus
-                        recent_pullback = k
-                        slowdown_feature = '减速回调+5日内收回0.618' if fib_reclaim and slowdown >= 1 else ('5日内收回0.618' if fib_reclaim else ('减速回调' if slowdown >= 1 else '一般'))
-                        volume_feature = '量缩' if vol_shrink else '量平/放量'
-                        zone_text = f"{zone_low:.2f}-{zone_high:.2f}"
-                        if touched_chip and chip_zone:
-                            zone_text += f" / 筹码密集区中轴约{chip_zone[2]:.2f}"
-                        if touched_support and touched_chip:
-                            zone_text += " / 同時碰平台位 + 籌碼密集區更佳"
-            if recent_pullback is None:
+            if low <= breakout_leg_low * 1.002:
                 continue
-            recent_windows = build_recent_windows(df, qualifying_pullbacks, bullish=True, max_windows=3, max_gap_days=3)
-            recent_windows = filter_recent_windows_by_direction(df, recent_windows, bullish=True, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
-            pullback_or_latest_ok = (
-                passes_direction_filter_on_idx(df, recent_pullback, bullish=True, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
-                or passes_direction_filter_on_idx(df, len(df) - 1, bullish=True, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
-            )
-            if not pullback_or_latest_ok:
+
+            touch_chip = False
+            chip_mid = None
+            chip_low = None
+            chip_high = None
+            if chip_zone:
+                chip_low, chip_high, chip_mid = chip_zone
+                touch_chip = (chip_low * 0.99 <= low <= chip_high * 1.01) or (chip_low * 0.99 <= close <= chip_high * 1.01)
+
+            touch_platform = False
+            platform_low = None
+            platform_high = None
+            if platform_zone:
+                platform_low, platform_high = platform_zone
+                touch_platform = (platform_low * 0.992 <= low <= platform_high * 1.008) or (platform_low * 0.992 <= close <= platform_high * 1.008)
+
+            touch_prior_high = bool(prior_high is not None and abs(low / prior_high - 1.0) <= 0.02)
+            touch_support_line = bool(support_line and close >= support_line * 0.995)
+            above_20d_close = False
+            close_20d_ago = None
+            if k >= 20:
+                close_20d_ago = float(df.iloc[k - 20]['Close'])
+                above_20d_close = close > close_20d_ago * 1.01
+            support_count = sum(1 for flag in [touch_chip, touch_platform, touch_prior_high, touch_support_line] if flag)
+            if support_count == 0:
                 continue
-            if recent_windows:
-                filtered_pullback = date_to_index(df, recent_windows[-1]['representative_date'])
-                if filtered_pullback is not None:
-                    recent_pullback = filtered_pullback
-            all_window_points.extend(qualifying_pullbacks)
-            breakdown_vol20 = float(df.iloc[max(0, base_offset + breakdown_idx - 20):base_offset + breakdown_idx]['Volume'].mean()) if (base_offset + breakdown_idx) > 0 else 0.0
-            breakout_vol_bonus = 5 if breakdown_vol20 > 0 and float(df.iloc[base_offset + breakdown_idx]['Volume']) < breakdown_vol20 else 0
-            score = 50
-            score += max(0, 15 - pct_diff(p1, p2)*500)
-            if (lj - li) >= DOUBLE_STRUCTURE_WIDE_GAP_THRESHOLD:
-                score += DOUBLE_STRUCTURE_WIDE_GAP_BONUS
-            score += max(0, 10 - abs(breakdown_mag - 0.025)*120)
-            score += score_confirm_day(df, global_confirm, bullish=True)
-            score += best_bonus
-            score += breakout_vol_bonus
-            if long_term_trend_break is not None:
-                score += LONG_TERM_TREND_BONUS
-            logic = '双底下破后回升站回支撑区上方并打破最近下降趋势线，近期回踩支撑/籌碼密集區；同時碰平台位 + 籌碼密集區更佳，中途若跌穿0.618需5日内阳烛或裂口收回'
-            # 新增：52週最低位接近度加分
-            week52_bonus = calc_week52_proximity_bonus_long(df, recent_pullback)
-            score += week52_bonus
-            # 新增：20日均線過濾條件
-            if not check_pullback_20d_filter_long(df, recent_pullback):
+
+            if not (low <= float(df.iloc[k-1]['Low']) and low <= float(df.iloc[k+1]['Low'])):
                 continue
-            candidates.append(make_result(
-                symbol=symbol,
-                direction='做多',
-                pattern='破底翻回调',
-                zone=zone_text,
-                event_date=df.iloc[base_offset + breakdown_idx]['Date'],
-                confirm_date=df.iloc[global_confirm]['Date'],
-                pullback_date=df.iloc[recent_pullback]['Date'],
-                price=df.iloc[-1]['Close'],
-                fib618=fib618,
-                volume_feature=volume_feature,
-                slowdown_feature=slowdown_feature,
-                score=score,
-                logic=logic,
-                recent_windows=recent_windows,
-            ))
+
+            rebound_idx = None
+            for j in range(k + 1, min(len(df), k + 6)):
+                if float(df.iloc[j]['Close']) > float(df.iloc[j-1]['High']):
+                    rebound_idx = j
+                    break
+            daily_rebound_confirmed = rebound_idx is not None
+            needs_intraday_reversal = rebound_idx is None
+
+            vol20 = trailing_avg_dollar_volume(df, k, days=20) or 0.0
+            pullback_day_dv = float(df.iloc[k]['Close']) * float(df.iloc[k]['Volume'])
+            vol_shrink = vol20 > 0 and pullback_day_dv < vol20
+
+            rise_seg = df.iloc[max(breakdown_idx, confirm_idx - 8):confirm_idx + 1]
+            pb_seg = df.iloc[confirm_idx + 1:k + 1]
+            slowdown = 0
+            if len(rise_seg) >= 3 and len(pb_seg) >= 2:
+                if avg_body(pb_seg) < avg_body(rise_seg) * 0.85:
+                    slowdown += 1
+                if avg_tr(pb_seg) < avg_tr(rise_seg) * 0.90:
+                    slowdown += 1
+
+            bonus = 0.0
+            bonus += 14 if touch_chip else 0
+            bonus += 8 if touch_platform else 0
+            bonus += 6 if touch_prior_high else 0
+            bonus += 4 if touch_support_line else 0
+            bonus += 5 if above_20d_close else 0
+            bonus += 6 if touch_chip and touch_platform else 0
+            bonus += 5 if in_fib_zone else 0
+            bonus += 4 if fib_reclaimed else 0
+            bonus += 6 if vol_shrink else 0
+            bonus += slowdown * 4
+            bonus += min(support_count, 4) * 3
+            if daily_rebound_confirmed and rebound_idx - k <= 2:
+                bonus += 5
+            if double_top_gap >= 60:
+                bonus += LONG_SPAN_BONUS
+            if needs_intraday_reversal:
+                bonus -= 3
+
+            entry_anchor_idx = rebound_idx if rebound_idx is not None else k
+            entry_price = max(float(df.iloc[entry_anchor_idx]['Close']), float(df.iloc[k]['High']))
+            stop_price = None
+            if touch_chip and chip_low is not None:
+                stop_price = chip_low * 0.985
+            elif platform_low is not None:
+                stop_price = platform_low * 0.985
+            elif prior_high is not None and low > prior_high * 0.985:
+                stop_price = prior_high * 0.985
+            else:
+                structural_low = min(low, breakout_leg_low)
+                if structural_low < entry_price * 0.985:
+                    stop_price = structural_low * 0.985
+                else:
+                    stop_price = entry_price * 0.95
+            risk = entry_price - stop_price
+            if risk <= 0:
+                continue
+
+            target1 = double_top_mid
+            if target1 <= entry_price:
+                target1 = max(double_top_mid, post_confirm_high, entry_price + max(risk * 1.2, entry_price * 0.03))
+            target2 = low + 1.618 * (breakout_leg_high - breakout_leg_low)
+            if target2 <= target1:
+                target2 = max(target1 + risk, entry_price + 1.618 * risk)
+            rr1 = (target1 - entry_price) / risk if target1 > entry_price else 0.0
+            bonus += min(rr1, 4.0) * 6
+
+            pullback_candidates.append({'idx': k, 'price_level': low})
+            qualifying_pullbacks_all.append({'idx': k, 'price_level': low})
+
+            if bonus > best_score or (math.isclose(bonus, best_score) and (best_pullback_idx is None or k > best_pullback_idx)):
+                best_score = bonus
+                best_pullback_idx = k
+                best_entry = entry_price
+                best_stop = stop_price
+                best_target1 = target1
+                best_target2 = target2
+                best_band_mid = chip_mid
+                best_chip_zone_low = chip_low
+                best_chip_zone_high = chip_high
+                zone_parts = [f"回踩 0.5-0.618 ({fib50:.2f}/{fib618:.2f})"]
+                if fib_reclaimed and not in_fib_zone:
+                    zone_parts.append('跌穿0.618後5日內收回')
+                if touch_chip and chip_mid is not None:
+                    zone_parts.append(f"籌碼密集區 {chip_low:.2f}-{chip_high:.2f} / 中軸 {chip_mid:.2f}")
+                if touch_platform and platform_low is not None and platform_high is not None:
+                    zone_parts.append(f"平台區 {platform_low:.2f}-{platform_high:.2f}")
+                if touch_prior_high and prior_high is not None:
+                    zone_parts.append(f"前高支撐 {prior_high:.2f}")
+                if above_20d_close and close_20d_ago is not None:
+                    zone_parts.append(f"回調價高於20日前收市 {close_20d_ago:.2f}")
+                best_zone_text = ' / '.join(zone_parts)
+                best_volume_feature = '確認放量+回調量縮' if breakout_volume_feature == '確認放量' and vol_shrink else (breakout_volume_feature if not vol_shrink else '回調量縮')
+                best_slowdown_feature = '回調減速' if slowdown >= 1 else '回調正常'
+                best_support_flags = {
+                    'touch_chip': touch_chip,
+                    'touch_platform': touch_platform,
+                    'touch_prior_high': touch_prior_high,
+                    'touch_support_line': touch_support_line,
+                    'above_20d_close': above_20d_close,
+                    'close_20d_ago': round(float(close_20d_ago), 2) if close_20d_ago is not None else None,
+                    'support_count': support_count,
+                    'fib_reclaimed': fib_reclaimed,
+                }
+
+        if best_pullback_idx is None:
+            continue
+
+        recent_windows = build_recent_windows(df, pullback_candidates, bullish=True, max_windows=3, max_gap_days=3)
+        recent_windows = filter_recent_windows_by_direction(df, recent_windows, bullish=True, days=20, min_pct=1.0)
+        if recent_windows:
+            filtered_pullback = date_to_index(df, recent_windows[-1]['representative_date'])
+            if filtered_pullback is not None:
+                best_pullback_idx = filtered_pullback
+
+        score = 50.0
+        score += max(0.0, 10.0 - max(0, double_top_gap - 20) * 0.15)
+        score += max(0.0, 12.0 - pct_diff(top1_high, top2_high) * 800.0)
+        score += score_confirm_day(df, confirm_idx, bullish=True)
+        score += best_score
+        if long_term_trend_break is not None:
+            score += LONG_TERM_TREND_BONUS
+        if double_top_gap >= 60:
+            score += LONG_SPAN_BONUS
+
+        logic = '先找兩個相隔至少20日、頂價差2%內的明顯雙頂；雙頂之間不可出現更高價，第二頂後不可再跌破谷底；其後等待結構確認與趨勢線突破，最後只做回踩0.5-0.618且有籌碼密集區/平台/前高/支撐線共振的第二買點；回調後可用日線重新轉強或同日30m反轉確認。'
+        candidate = make_result(
+            symbol=symbol,
+            direction='做多',
+            pattern='雙頂→破底翻→回調買點',
+            zone=best_zone_text,
+            event_date=df.iloc[breakdown_idx]['Date'],
+            confirm_date=df.iloc[confirm_idx]['Date'],
+            pullback_date=df.iloc[best_pullback_idx]['Date'],
+            price=df.iloc[-1]['Close'],
+            fib618=fib618,
+            volume_feature=best_volume_feature,
+            slowdown_feature=best_slowdown_feature,
+            score=score,
+            logic=logic,
+            recent_windows=recent_windows,
+        )
+        candidate.update({
+            'entry_price': round(float(best_entry), 2) if best_entry is not None else None,
+            'double_top_1_date': df.iloc[top1_idx]['Date'].strftime('%Y-%m-%d'),
+            'double_top_2_date': df.iloc[top2_idx]['Date'].strftime('%Y-%m-%d'),
+            'double_top_mid': round(float(double_top_mid), 2),
+            'double_top_gap_days': int(double_top_gap),
+            'valley_date': df.iloc[valley_idx]['Date'].strftime('%Y-%m-%d'),
+            'valley_low': round(float(valley_low), 2),
+            'valley_high': round(float(valley_high), 2),
+            'breakdown_date': df.iloc[breakdown_idx]['Date'].strftime('%Y-%m-%d'),
+            'breakdown_reclaim_date': df.iloc[reclaim_idx]['Date'].strftime('%Y-%m-%d'),
+            'breakdown_ref_high': round(float(breakdown_ref_high), 2) if breakdown_ref_high is not None else None,
+            'trend_break_date': df.iloc[confirm_idx]['Date'].strftime('%Y-%m-%d'),
+            'chip_zone_low': round(float(best_chip_zone_low), 2) if best_chip_zone_low is not None else None,
+            'chip_zone_high': round(float(best_chip_zone_high), 2) if best_chip_zone_high is not None else None,
+            'chip_zone_mid': round(float(best_band_mid), 2) if best_band_mid is not None else None,
+            'support_flags': best_support_flags,
+            'risk_reward_1': round(float((best_target1 - best_entry) / (best_entry - best_stop)), 2) if best_entry is not None and best_stop is not None and best_target1 is not None and best_entry > best_stop else None,
+            'daily_rebound_confirmed': daily_rebound_confirmed,
+            'needs_intraday_reversal': needs_intraday_reversal,
+        })
+        candidates.append(candidate)
+
     if not candidates:
         return None
-    candidates.sort(key=lambda x: (x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+
+    candidates.sort(key=lambda x: (x['score'], x['_sort_pullback'], x['_sort_confirm']), reverse=True)
     best = candidates[0]
     best['recent_windows'] = filter_recent_windows_by_direction(
         df,
-        build_recent_windows(df, all_window_points, bullish=True, max_windows=3, max_gap_days=3),
+        build_recent_windows(df, qualifying_pullbacks_all, bullish=True, max_windows=3, max_gap_days=3),
         bullish=True,
-        days=DIRECTION_FILTER_DAYS,
-        min_pct=DIRECTION_FILTER_MIN_PCT,
+        days=20,
+        min_pct=1.0,
     )
     return best
 
 
 def scan_short(symbol, df):
-    if len(df) < 140:
+    if len(df) < 90:
         return None
-    sdf, highs = local_extrema(df, 'high', 90, SWING_WINDOW)
+    df = df.copy().dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume']).reset_index(drop=True)
+    if len(df) < 90:
+        return None
+
+    pivot_window = SWING_WINDOW
+    pivot_lows = []
+    pivot_highs = []
+    for i in range(pivot_window, len(df) - pivot_window):
+        low_seg = df['Low'].iloc[i-pivot_window:i+pivot_window+1]
+        high_seg = df['High'].iloc[i-pivot_window:i+pivot_window+1]
+        if float(df.iloc[i]['Low']) == float(low_seg.min()) and int(low_seg.argmin()) == pivot_window:
+            pivot_lows.append(i)
+        if float(df.iloc[i]['High']) == float(high_seg.max()) and int(high_seg.argmax()) == pivot_window:
+            pivot_highs.append(i)
+
+    if len(pivot_highs) < 2 or len(pivot_lows) < 2:
+        return None
+
     candidates = []
-    all_window_points = []
-    base_offset = len(df) - len(sdf)
-    for i in range(len(highs)):
-        for j in range(i+1, len(highs)):
-            hi, hj = highs[i], highs[j]
-            if not valid_double_top_structure(sdf, hi, hj):
+    qualifying_pullbacks_all = []
+
+    for low2_idx in pivot_lows:
+        if low2_idx < 30 or low2_idx > len(df) - 10:
+            continue
+        low2_price = float(df.iloc[low2_idx]['Low'])
+
+        low1_candidates = [
+            idx for idx in pivot_lows
+            if low2_idx - 80 <= idx <= low2_idx - 20
+            and pct_diff(float(df.iloc[idx]['Low']), low2_price) <= 0.02
+        ]
+        if not low1_candidates:
+            continue
+        low1_idx = min(low1_candidates, key=lambda idx: abs((low2_idx - idx) - 15))
+        low1_price = float(df.iloc[low1_idx]['Low'])
+        if has_lower_low_between(df, low1_idx, low2_idx, min(low1_price, low2_price)):
+            continue
+        double_bottom_mid = (low1_price + low2_price) / 2.0
+        double_bottom_gap = low2_idx - low1_idx
+
+        peak_candidates = [idx for idx in pivot_highs if low1_idx + 2 <= idx <= low2_idx - 2]
+        if not peak_candidates:
+            continue
+        peak_idx = max(peak_candidates, key=lambda idx: float(df.iloc[idx]['High']))
+        peak_high = float(df.iloc[peak_idx]['High'])
+        peak_low = float(df.iloc[peak_idx]['Low'])
+        if breaks_above_level_after(df, low2_idx, peak_high):
+            continue
+
+        breakout_idx = None
+        reclaim_idx = None
+        breakout_ref_low = None
+        for j in range(low2_idx + 1, min(len(df) - 1, low2_idx + 26)):
+            high_j = float(df.iloc[j]['High'])
+            close_j = float(df.iloc[j]['Close'])
+            if high_j < peak_high * 1.003:
                 continue
-            p1, p2 = float(sdf.iloc[hi]['High']), float(sdf.iloc[hj]['High'])
-            if pct_diff(p1, p2) > 0.03:
-                continue
-            zone_low = min(p1, p2)
-            zone_high = max(p1, p2)
-            zone_mid = (zone_low + zone_high)/2.0
-            breakout_idx = None
-            breakout_mag = None
-            for k in range(hj+1, len(sdf)):
-                high = float(sdf.iloc[k]['High'])
-                close = float(sdf.iloc[k]['Close'])
-                break_price = max(high, close)
-                mag = (break_price - zone_high) / zone_high
-                if 0.005 <= mag <= 0.08:
-                    breakout_idx = k
-                    breakout_mag = mag
+            prev_body_low = min(float(df.iloc[j - 1]['Open']), float(df.iloc[j - 1]['Close']))
+            prev_body_high = max(float(df.iloc[j - 1]['Open']), float(df.iloc[j - 1]['Close']))
+            for r in range(j, min(len(df), j + 6)):
+                close_r = float(df.iloc[r]['Close'])
+                if close_r <= prev_body_high or close_r <= peak_high:
+                    breakout_idx = j
+                    reclaim_idx = r
+                    breakout_ref_low = prev_body_low
                     break
-            if breakout_idx is None:
+            if breakout_idx is not None:
+                break
+        if breakout_idx is None or reclaim_idx is None:
+            fallback_candidate = build_short_right_shoulder_after_double_bottom(symbol, df, low1_idx, low2_idx, peak_idx)
+            if fallback_candidate is not None:
+                candidates.append(fallback_candidate)
+            continue
+
+        confirm_idx = None
+        trendline_break = None
+        drop_high = max(float(df.iloc[breakout_idx]['High']), float(df.iloc[reclaim_idx]['High']))
+        for j in range(reclaim_idx + 2, min(len(df) - 3, reclaim_idx + 31)):
+            close_j = float(df.iloc[j]['Close'])
+            low_j = float(df.iloc[j]['Low'])
+            drop_pct = (drop_high / low_j - 1.0) * 100.0 if low_j > 0 else 0.0
+            if drop_pct < 6.0:
                 continue
-            confirm_idx = None
-            for k in range(breakout_idx+1, len(sdf)):
-                close = float(sdf.iloc[k]['Close'])
-                if close <= zone_low:
-                    global_k = base_offset + k
-                    confirm_idx = k
-                    break
-            if confirm_idx is None:
-                continue
-            global_confirm = base_offset + confirm_idx
-            if global_confirm < len(df) - 30:
-                continue
-            trendline_break = find_recent_asc_trendline_break(df, global_confirm, lookback=SHORT_TREND_LOOKBACK, window=SWING_WINDOW)
+            trendline_break = find_recent_asc_trendline_break(df, j, lookback=SHORT_TREND_LOOKBACK, window=SWING_WINDOW)
             if trendline_break is None:
                 continue
-            long_term_trend_break = find_recent_asc_trendline_break(df, global_confirm, lookback=LONG_TREND_LOOKBACK, window=SWING_WINDOW)
-            post_conf = df.iloc[global_confirm+1:].copy()
-            if len(post_conf) < 3:
+            confirm_idx = j
+            break
+        if confirm_idx is None:
+            continue
+        if confirm_idx < len(df) - 35:
+            continue
+
+        long_term_trend_break = find_recent_asc_trendline_break(df, confirm_idx, lookback=LONG_TREND_LOOKBACK, window=SWING_WINDOW)
+
+        breakout_leg_high = drop_high
+        breakout_leg_low = float(df.iloc[confirm_idx]['Low'])
+        if breakout_leg_high <= breakout_leg_low:
+            continue
+        fib50 = breakout_leg_low + 0.5 * (breakout_leg_high - breakout_leg_low)
+        fib618 = breakout_leg_low + 0.618 * (breakout_leg_high - breakout_leg_low)
+        if fib50 > fib618:
+            fib50, fib618 = fib618, fib50
+
+        best_pullback_idx = None
+        best_score = -1e9
+        best_zone_text = f"雙底支撐 {double_bottom_mid:.2f}"
+        best_volume_feature = '一般'
+        best_slowdown_feature = '一般'
+        best_entry = None
+        best_stop = None
+        best_target1 = None
+        best_target2 = None
+        best_band_mid = None
+        best_chip_zone_low = None
+        best_chip_zone_high = None
+        best_support_flags = {}
+        pullback_candidates = []
+
+        chip_zone = find_chip_dense_zone(df, confirm_idx, lookback=30)
+        platform_zone = find_platform_zone(df['Close'], confirm_idx, direction='short')
+        breakout_vol20 = trailing_avg_dollar_volume(df, confirm_idx, days=20) or 0.0
+        breakout_day_dv = float(df.iloc[confirm_idx]['Close']) * float(df.iloc[confirm_idx]['Volume'])
+        breakout_volume_feature = '確認放量' if breakout_vol20 > 0 and breakout_day_dv > breakout_vol20 else '確認量平'
+
+        prior_low_idx = nearest_swing_low(df, reclaim_idx, max(reclaim_idx + 1, confirm_idx - 1))
+        prior_low = float(df.iloc[prior_low_idx]['Low']) if prior_low_idx is not None else None
+        resistance_line = trendline_break['line_value'] if trendline_break is not None else None
+
+        post_confirm_low = breakout_leg_low
+        for k in range(confirm_idx + 2, len(df) - 1):
+            low = float(df.iloc[k]['Low'])
+            close = float(df.iloc[k]['Close'])
+            high = float(df.iloc[k]['High'])
+            post_confirm_low = min(post_confirm_low, low)
+
+            in_fib_zone = fib50 * 0.99 <= high <= fib618 * 1.005
+            fib_ok, fib_reclaimed = qualifies_reclaim_after_fib_break_short(df, fib618, k, max_days=5)
+            if not in_fib_zone and not fib_reclaimed:
                 continue
-            wave_high_idx = nearest_swing_high(df, max(0, global_confirm-20), global_confirm)
-            wave_low_idx = nearest_swing_low(df, global_confirm, len(df)-1)
-            if wave_low_idx is None or wave_high_idx is None or wave_low_idx <= wave_high_idx:
+            if not fib_ok:
                 continue
-            wave_high = float(df.iloc[wave_high_idx]['High'])
-            wave_low = float(df.iloc[wave_low_idx]['Low'])
-            fib618 = wave_low + 0.618 * (wave_high - wave_low)
-            recent_pullback = None
-            qualifying_pullbacks = []
-            best_bonus = -1e9
-            slowdown_feature = '一般'
-            volume_feature = '量平/放量'
-            zone_text = f"{zone_low:.2f}-{zone_high:.2f}"
-            chip_zone = find_chip_dense_zone(df, global_confirm, lookback=30)
-            for k in range(global_confirm+2, len(df)-1):
-                close = float(df.iloc[k]['Close'])
-                high = float(df.iloc[k]['High'])
-                fib_ok, fib_reclaim = qualifies_reclaim_after_fib_break_short(df, fib618, k, max_days=5)
-                if not fib_ok:
-                    continue
-                touched_res = (zone_low * 0.985 <= high <= zone_high * 1.015)
-                touched_chip = False
-                if chip_zone:
-                    cl, ch, _ = chip_zone
-                    touched_chip = (cl*0.99 <= close <= ch*1.01) or (cl*0.99 <= high <= ch*1.01)
-                if not (touched_res or touched_chip):
-                    continue
-                if k+1 < len(df) and high >= float(df.iloc[k-1]['High']) and high >= float(df.iloc[k+1]['High']):
-                    fall_seg = df.iloc[global_confirm: max(global_confirm+1, min(wave_low_idx+1, k))]
-                    rb_seg = df.iloc[max(global_confirm+1, wave_low_idx):k+1] if wave_low_idx < k else df.iloc[global_confirm+1:k+1]
-                    slowdown = 0
-                    if len(fall_seg) >= 3 and len(rb_seg) >= 2:
-                        if avg_body(rb_seg) < avg_body(fall_seg) * 0.85:
-                            slowdown += 1
-                        if avg_tr(rb_seg) < avg_tr(fall_seg) * 0.9:
-                            slowdown += 1
-                    vol20 = float(df.iloc[max(0, k-20):k]['Volume'].mean()) if k > 0 else 0
-                    vol_shrink = vol20 > 0 and float(df.iloc[k]['Volume']) < vol20
-                    bonus = 0
-                    if touched_res:
-                        bonus += 8
-                    if touched_chip:
-                        bonus += 6
-                    if touched_res and touched_chip:
-                        bonus += 4
-                    if close <= fib618:
-                        bonus += 8
-                    elif high <= fib618 * 1.005:
-                        bonus += 5
-                    elif fib_reclaim:
-                        bonus += 4
-                    bonus += slowdown * 4
-                    if vol_shrink:
-                        bonus += 5
-                    qualifying_pullbacks.append({
-                        'idx': k,
-                        'price_level': high,
-                    })
-                    if bonus >= best_bonus or (recent_pullback is None or k > recent_pullback):
-                        best_bonus = bonus
-                        recent_pullback = k
-                        slowdown_feature = '减速回抽+5日内跌回0.618下方' if fib_reclaim and slowdown >= 1 else ('5日内跌回0.618下方' if fib_reclaim else ('减速回抽' if slowdown >= 1 else '一般'))
-                        volume_feature = '量缩' if vol_shrink else '量平/放量'
-                        zone_text = f"{zone_low:.2f}-{zone_high:.2f}"
-                        if touched_chip and chip_zone:
-                            zone_text += f" / 筹码密集区中轴约{chip_zone[2]:.2f}"
-                        if touched_res and touched_chip:
-                            zone_text += " / 同時碰平台位 + 籌碼密集區更佳"
-            if recent_pullback is None:
+            if high >= breakout_leg_high * 0.998:
                 continue
-            recent_windows = build_recent_windows(df, qualifying_pullbacks, bullish=False, max_windows=3, max_gap_days=3)
-            recent_windows = filter_recent_windows_by_direction(df, recent_windows, bullish=False, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
-            pullback_or_latest_ok = (
-                passes_direction_filter_on_idx(df, recent_pullback, bullish=False, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
-                or passes_direction_filter_on_idx(df, len(df) - 1, bullish=False, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
-            )
-            if not pullback_or_latest_ok:
+
+            touch_chip = False
+            chip_mid = None
+            chip_low = None
+            chip_high = None
+            if chip_zone:
+                chip_low, chip_high, chip_mid = chip_zone
+                touch_chip = (chip_low * 0.99 <= high <= chip_high * 1.01) or (chip_low * 0.99 <= close <= chip_high * 1.01)
+
+            touch_platform = False
+            platform_low = None
+            platform_high = None
+            if platform_zone:
+                platform_low, platform_high = platform_zone
+                touch_platform = (platform_low * 0.992 <= high <= platform_high * 1.008) or (platform_low * 0.992 <= close <= platform_high * 1.008)
+
+            touch_prior_low = bool(prior_low is not None and abs(high / prior_low - 1.0) <= 0.02)
+            touch_resistance_line = bool(resistance_line and close <= resistance_line * 1.005)
+            below_20d_close = False
+            close_20d_ago = None
+            if k >= 20:
+                close_20d_ago = float(df.iloc[k - 20]['Close'])
+                below_20d_close = close < close_20d_ago * 0.99
+            support_count = sum(1 for flag in [touch_chip, touch_platform, touch_prior_low, touch_resistance_line] if flag)
+            if support_count == 0:
                 continue
-            if recent_windows:
-                filtered_pullback = date_to_index(df, recent_windows[-1]['representative_date'])
-                if filtered_pullback is not None:
-                    recent_pullback = filtered_pullback
-            all_window_points.extend(qualifying_pullbacks)
-            breakout_vol20 = float(df.iloc[max(0, base_offset + breakout_idx - 20):base_offset + breakout_idx]['Volume'].mean()) if (base_offset + breakout_idx) > 0 else 0.0
-            breakout_vol_bonus = 5 if breakout_vol20 > 0 and float(df.iloc[base_offset + breakout_idx]['Volume']) < breakout_vol20 else 0
-            score = 50
-            score += max(0, 15 - pct_diff(p1, p2)*500)
-            if (hj - hi) >= DOUBLE_STRUCTURE_WIDE_GAP_THRESHOLD:
-                score += DOUBLE_STRUCTURE_WIDE_GAP_BONUS
-            score += max(0, 10 - abs(breakout_mag - 0.025)*120)
-            score += score_confirm_day(df, global_confirm, bullish=False)
-            score += best_bonus
-            score += breakout_vol_bonus
-            if long_term_trend_break is not None:
-                score += LONG_TERM_TREND_BONUS
-            logic = '双顶上破后跌回阻力区下方并跌破最近上升趋势线，近期回抽阻力/籌碼密集區；同時碰平台位 + 籌碼密集區更佳，中途若升穿0.618需5日内阴烛或裂口跌回'
-            # 新增：52週最高位接近度加分
-            week52_bonus = calc_week52_proximity_bonus_short(df, recent_pullback)
-            score += week52_bonus
-            # 新增：20日均線過濾條件
-            if not check_pullback_20d_filter_short(df, recent_pullback):
+
+            if not (high >= float(df.iloc[k-1]['High']) and high >= float(df.iloc[k+1]['High'])):
                 continue
-            candidates.append(make_result(
-                symbol=symbol,
-                direction='做空',
-                pattern='假突破回抽',
-                zone=zone_text,
-                event_date=df.iloc[base_offset + breakout_idx]['Date'],
-                confirm_date=df.iloc[global_confirm]['Date'],
-                pullback_date=df.iloc[recent_pullback]['Date'],
-                price=df.iloc[-1]['Close'],
-                fib618=fib618,
-                volume_feature=volume_feature,
-                slowdown_feature=slowdown_feature,
-                score=score,
-                logic=logic,
-                recent_windows=recent_windows,
-            ))
+
+            breakdown_follow_idx = None
+            for j in range(k + 1, min(len(df), k + 6)):
+                if float(df.iloc[j]['Close']) < float(df.iloc[j-1]['Low']):
+                    breakdown_follow_idx = j
+                    break
+            daily_breakdown_confirmed = breakdown_follow_idx is not None
+            needs_intraday_reversal = breakdown_follow_idx is None
+
+            vol20 = trailing_avg_dollar_volume(df, k, days=20) or 0.0
+            pullback_day_dv = float(df.iloc[k]['Close']) * float(df.iloc[k]['Volume'])
+            vol_shrink = vol20 > 0 and pullback_day_dv < vol20
+
+            drop_seg = df.iloc[max(breakout_idx, confirm_idx - 8):confirm_idx + 1]
+            pb_seg = df.iloc[confirm_idx + 1:k + 1]
+            slowdown = 0
+            if len(drop_seg) >= 3 and len(pb_seg) >= 2:
+                if avg_body(pb_seg) < avg_body(drop_seg) * 0.85:
+                    slowdown += 1
+                if avg_tr(pb_seg) < avg_tr(drop_seg) * 0.90:
+                    slowdown += 1
+
+            bonus = 0.0
+            bonus += 14 if touch_chip else 0
+            bonus += 8 if touch_platform else 0
+            bonus += 6 if touch_prior_low else 0
+            bonus += 4 if touch_resistance_line else 0
+            bonus += 5 if below_20d_close else 0
+            bonus += 6 if touch_chip and touch_platform else 0
+            bonus += 5 if in_fib_zone else 0
+            bonus += 4 if fib_reclaimed else 0
+            bonus += 6 if vol_shrink else 0
+            bonus += slowdown * 4
+            bonus += min(support_count, 4) * 3
+            if daily_breakdown_confirmed and breakdown_follow_idx - k <= 2:
+                bonus += 5
+            if double_bottom_gap >= 60:
+                bonus += LONG_SPAN_BONUS
+            if needs_intraday_reversal:
+                bonus -= 3
+
+            entry_anchor_idx = breakdown_follow_idx if breakdown_follow_idx is not None else k
+            entry_price = min(float(df.iloc[entry_anchor_idx]['Close']), float(df.iloc[k]['Low']))
+            stop_price = None
+            if touch_chip and chip_high is not None:
+                stop_price = chip_high * 1.015
+            elif platform_high is not None:
+                stop_price = platform_high * 1.015
+            elif prior_low is not None and high < prior_low * 1.015:
+                stop_price = prior_low * 1.015
+            else:
+                structural_high = max(high, breakout_leg_high)
+                if structural_high > entry_price * 1.015:
+                    stop_price = structural_high * 1.015
+                else:
+                    stop_price = entry_price * 1.05
+            risk = stop_price - entry_price
+            if risk <= 0:
+                continue
+
+            target1 = double_bottom_mid
+            if target1 >= entry_price:
+                target1 = min(double_bottom_mid, post_confirm_low, entry_price - max(risk * 1.2, entry_price * 0.03))
+            target2 = high - 1.618 * (breakout_leg_high - breakout_leg_low)
+            if target2 >= target1:
+                target2 = min(target1 - risk, entry_price - 1.618 * risk)
+            rr1 = (entry_price - target1) / risk if target1 < entry_price else 0.0
+            bonus += min(rr1, 4.0) * 6
+
+            pullback_candidates.append({'idx': k, 'price_level': high})
+            qualifying_pullbacks_all.append({'idx': k, 'price_level': high})
+
+            if bonus > best_score or (math.isclose(bonus, best_score) and (best_pullback_idx is None or k > best_pullback_idx)):
+                best_score = bonus
+                best_pullback_idx = k
+                best_entry = entry_price
+                best_stop = stop_price
+                best_target1 = target1
+                best_target2 = target2
+                best_band_mid = chip_mid
+                best_chip_zone_low = chip_low
+                best_chip_zone_high = chip_high
+                zone_parts = [f"回抽 0.5-0.618 ({fib50:.2f}/{fib618:.2f})"]
+                if fib_reclaimed and not in_fib_zone:
+                    zone_parts.append('升穿0.618後5日內跌回')
+                if touch_chip and chip_mid is not None:
+                    zone_parts.append(f"籌碼密集區 {chip_low:.2f}-{chip_high:.2f} / 中軸 {chip_mid:.2f}")
+                if touch_platform and platform_low is not None and platform_high is not None:
+                    zone_parts.append(f"平台區 {platform_low:.2f}-{platform_high:.2f}")
+                if touch_prior_low and prior_low is not None:
+                    zone_parts.append(f"前低阻力 {prior_low:.2f}")
+                if below_20d_close and close_20d_ago is not None:
+                    zone_parts.append(f"回抽價低於20日前收市 {close_20d_ago:.2f}")
+                best_zone_text = ' / '.join(zone_parts)
+                best_volume_feature = '確認放量+回抽量縮' if breakout_volume_feature == '確認放量' and vol_shrink else (breakout_volume_feature if not vol_shrink else '回抽量縮')
+                best_slowdown_feature = '回抽減速' if slowdown >= 1 else '回抽正常'
+                best_support_flags = {
+                    'touch_chip': touch_chip,
+                    'touch_platform': touch_platform,
+                    'touch_prior_low': touch_prior_low,
+                    'touch_resistance_line': touch_resistance_line,
+                    'below_20d_close': below_20d_close,
+                    'close_20d_ago': round(float(close_20d_ago), 2) if close_20d_ago is not None else None,
+                    'support_count': support_count,
+                    'fib_reclaimed': fib_reclaimed,
+                }
+
+        if best_pullback_idx is None:
+            continue
+
+        recent_windows = build_recent_windows(df, pullback_candidates, bullish=False, max_windows=3, max_gap_days=3)
+        recent_windows = filter_recent_windows_by_direction(df, recent_windows, bullish=False, days=20, min_pct=1.0)
+        if recent_windows:
+            filtered_pullback = date_to_index(df, recent_windows[-1]['representative_date'])
+            if filtered_pullback is not None:
+                best_pullback_idx = filtered_pullback
+
+        score = 50.0
+        score += max(0.0, 10.0 - max(0, double_bottom_gap - 20) * 0.15)
+        score += max(0.0, 12.0 - pct_diff(low1_price, low2_price) * 800.0)
+        score += score_confirm_day(df, confirm_idx, bullish=False)
+        score += best_score
+        if long_term_trend_break is not None:
+            score += LONG_TERM_TREND_BONUS
+        if double_bottom_gap >= 60:
+            score += LONG_SPAN_BONUS
+
+        logic = '先找兩個相隔至少20日、底價差2%內的明顯雙底；雙底之間不可出現更低價，第二底後不可再升破峰頂；其後等待結構確認與跌破近期上升趨勢線，最後只做回抽0.5-0.618且有籌碼密集區/平台/前低/阻力線共振的第二賣點；回抽後可用日線重新轉弱或同日30m反轉確認。'
+        candidate = make_result(
+            symbol=symbol,
+            direction='做空',
+            pattern='雙底→假突破→回調賣點',
+            zone=best_zone_text,
+            event_date=df.iloc[breakout_idx]['Date'],
+            confirm_date=df.iloc[confirm_idx]['Date'],
+            pullback_date=df.iloc[best_pullback_idx]['Date'],
+            price=df.iloc[-1]['Close'],
+            fib618=fib618,
+            volume_feature=best_volume_feature,
+            slowdown_feature=best_slowdown_feature,
+            score=score,
+            logic=logic,
+            recent_windows=recent_windows,
+        )
+        candidate.update({
+            'entry_price': round(float(best_entry), 2) if best_entry is not None else None,
+            'double_bottom_1_date': df.iloc[low1_idx]['Date'].strftime('%Y-%m-%d'),
+            'double_bottom_2_date': df.iloc[low2_idx]['Date'].strftime('%Y-%m-%d'),
+            'double_bottom_mid': round(float(double_bottom_mid), 2),
+            'double_bottom_gap_days': int(double_bottom_gap),
+            'peak_date': df.iloc[peak_idx]['Date'].strftime('%Y-%m-%d'),
+            'peak_high': round(float(peak_high), 2),
+            'peak_low': round(float(peak_low), 2),
+            'breakout_date': df.iloc[breakout_idx]['Date'].strftime('%Y-%m-%d'),
+            'fake_breakdown_date': df.iloc[reclaim_idx]['Date'].strftime('%Y-%m-%d'),
+            'breakout_ref_low': round(float(breakout_ref_low), 2) if breakout_ref_low is not None else None,
+            'trend_break_date': df.iloc[confirm_idx]['Date'].strftime('%Y-%m-%d'),
+            'chip_zone_low': round(float(best_chip_zone_low), 2) if best_chip_zone_low is not None else None,
+            'chip_zone_high': round(float(best_chip_zone_high), 2) if best_chip_zone_high is not None else None,
+            'chip_zone_mid': round(float(best_band_mid), 2) if best_band_mid is not None else None,
+            'support_flags': best_support_flags,
+            'risk_reward_1': round(float((best_entry - best_target1) / (best_stop - best_entry)), 2) if best_entry is not None and best_stop is not None and best_target1 is not None and best_stop > best_entry else None,
+            'daily_breakdown_confirmed': daily_breakdown_confirmed,
+            'needs_intraday_reversal': needs_intraday_reversal,
+        })
+        candidates.append(candidate)
+
     if not candidates:
         return None
-    candidates.sort(key=lambda x: (x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+
+    candidates.sort(key=lambda x: (x['score'], x['_sort_pullback'], x['_sort_confirm']), reverse=True)
     best = candidates[0]
     best['recent_windows'] = filter_recent_windows_by_direction(
         df,
-        build_recent_windows(df, all_window_points, bullish=False, max_windows=3, max_gap_days=3),
+        build_recent_windows(df, qualifying_pullbacks_all, bullish=False, max_windows=3, max_gap_days=3),
         bullish=False,
-        days=DIRECTION_FILTER_DAYS,
-        min_pct=DIRECTION_FILTER_MIN_PCT,
+        days=20,
+        min_pct=1.0,
     )
     return best
 
 
 def main():
-    parser = argparse.ArgumentParser(description='U.S. pullback pattern scan')
+    parser = argparse.ArgumentParser(description='U.S. double-top breakdown-reclaim pullback scan')
     parser.add_argument('--format', choices=['json', 'markdown'], default='json')
     parser.add_argument('--max-symbols', type=int, default=0, help='Optional cap on universe size for smoke tests')
     parser.add_argument('--stderr-path', default='/tmp/us_pattern_scan_yf_stderr.log')
@@ -1362,7 +2211,7 @@ def main():
 
     for shard_idx, shard_symbols in enumerate(shard_lists, start=1):
         append_log(stderr_path, f"STAGE2_SHARD_START shard={shard_idx}/{len(shard_lists)} symbols={len(shard_symbols)}")
-        stage2, shard_miss = download_bars(shard_symbols, '1y', stderr_path, batch=args.stage2_batch, phase=f'STAGE2_SHARD_{shard_idx:02d}')
+        stage2, shard_miss = download_bars(shard_symbols, '8mo', stderr_path, batch=args.stage2_batch, phase=f'STAGE2_SHARD_{shard_idx:02d}')
         shard_results, shard_long, shard_short = scan_stage2_dataset(stage2, mapped, stderr_path)
         deep_scan_count += len(stage2)
         miss2.update(shard_miss)
@@ -1394,7 +2243,8 @@ def main():
             f"STAGE2_SHARD_DONE shard={shard_idx}/{len(shard_lists)} downloaded={len(stage2)} misses={len(shard_miss)} candidates={len(shard_results)}"
         )
 
-    results.sort(key=lambda x: (x['_sort_pullback'], x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+    enrich_rows_with_intraday_30m(results, stderr_path)
+    results.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', 0), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
     deduped = []
     seen_symbols = set()
     for row in results:
@@ -1416,8 +2266,8 @@ def main():
         if row_50m_plus:
             band_rows_50m_plus.append(row_50m_plus)
 
-    band_rows_20m_to_50m.sort(key=lambda x: (x['_sort_pullback'], x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
-    band_rows_50m_plus.sort(key=lambda x: (x['_sort_pullback'], x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+    band_rows_20m_to_50m.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', 0), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+    band_rows_50m_plus.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', 0), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
 
     top10_long_20m_to_50m = [row for row in band_rows_20m_to_50m if row['direction'] == '做多'][:10]
     top10_short_20m_to_50m = [row for row in band_rows_20m_to_50m if row['direction'] == '做空'][:10]
@@ -1430,6 +2280,7 @@ def main():
             'Nasdaq Trader nasdaqlisted.txt',
             'Nasdaq Trader otherlisted.txt',
             'Yahoo Finance / yfinance 日线 OHLCV',
+            'Yahoo Finance / yfinance 30分鐘 OHLCV（盤中 30m 反應優先排序）',
             '回調日過去20個交易日平均交易額分組（2000萬-5000萬美元；5000萬美元以上）',
         ],
         'universe_total': int(len(original_symbols)),
