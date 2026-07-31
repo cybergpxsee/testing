@@ -1,4 +1,4 @@
-name: us-head-shoulder-bottom-scan
+name: us-head-shoulder-bottom-scan (週線版)
 
 on:
   workflow_dispatch:
@@ -84,14 +84,14 @@ jobs:
       - name: Upload output artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: us-head-shoulder-bottom-scan-${{ github.run_id }}
+          name: us-head-shoulder-bottom-scan-weekly-${{ github.run_id }}
           path: output/
           if-no-files-found: error
 
       - name: Append latest markdown to job summary
         shell: bash
         run: |
-          latest_md=$(find output -name 'head_shoulder_scan.md' | sort | tail -n 1)
+          latest_md=$(find output -name 'weekly_pullback_scan.md' | sort | tail -n 1)
           echo '## Latest report' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           cat "$latest_md" >> "$GITHUB_STEP_SUMMARY"
@@ -101,5 +101,5 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         if: success() && env.DISCORD_WEBHOOK_URL != ''
         run: |
-          latest_md=$(find output -name 'head_shoulder_scan.md' | sort | tail -n 1)
+          latest_md=$(find output -name 'weekly_pullback_scan.md' | sort | tail -n 1)
           python scripts/post_to_discord.py "$latest_md"
