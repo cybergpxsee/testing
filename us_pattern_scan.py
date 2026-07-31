@@ -304,6 +304,25 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD', int
     return out, misses
 
 
+def resample_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+    x = df.copy().dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
+    if len(x) == 0:
+        return pd.DataFrame(columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+    x['Date'] = pd.to_datetime(x['Date'])
+    x = x.set_index('Date')
+    weekly = x.resample('W-FRI').agg({
+        'Open': 'first',
+        'High': 'max',
+        'Low': 'min',
+        'Close': 'last',
+        'Volume': 'sum',
+    }).dropna(subset=['Open', 'High', 'Low', 'Close']).reset_index()
+    weekly['Date'] = pd.to_datetime(weekly['Date']).dt.tz_localize(None)
+    return weekly.reset_index(drop=True)
+
+
 def default_intraday_30m_signal(signal_type: str = '無訊號') -> dict:
     return {
         'has_30m_signal': False,
@@ -325,14 +344,23 @@ def analyze_intraday_30m_buy_signal(df30: pd.DataFrame, pullback_date: str | Non
     if pullback_date:
         try:
             cutoff = pd.Timestamp(str(pullback_date))
-            x = x[x['Date'] >= cutoff].reset_index(drop=True)
+            anchor_candidates = x.index[x['Date'] >= cutoff].tolist()
+            if not anchor_candidates:
+                return result
+            anchor_idx = anchor_candidates[0]
+            left = max(0, anchor_idx - 6)
+            right = min(len(x), anchor_idx + 6)
+            x = x.iloc[left:right].reset_index(drop=True)
+            anchor_idx = anchor_idx - left
         except Exception:
-            pass
-    if len(x) < 12:
+            anchor_idx = 6
+    else:
+        anchor_idx = 6
+    if len(x) < 8:
         return result
 
     best = None
-    for i in range(6, len(x)):
+    for i in range(max(6, anchor_idx), len(x)):
         base = x.iloc[max(0, i - 6):i]
         if len(base) < 4:
             continue
@@ -341,35 +369,35 @@ def analyze_intraday_30m_buy_signal(df30: pd.DataFrame, pullback_date: str | Non
         low_i = float(x.iloc[i]['Low'])
         close_i = float(x.iloc[i]['Close'])
 
-        # 30m 破底翻後回前高
+        # 30M 破底翻後回前高
         if low_i < prev_low * 0.998 and close_i >= prev_low:
             trigger_high = max(prev_high, float(x.iloc[i]['High']))
-            for j in range(i, min(len(x), i + 7)):
+            for j in range(i, min(len(x), i + 7, anchor_idx + 6)):
                 close_j = float(x.iloc[j]['Close'])
                 if close_j >= trigger_high * 0.998:
                     cand = {
                         'has_30m_signal': True,
-                        'signal_type': '30m破底翻回前高',
+                        'signal_type': '30M破底翻回前高',
                         'signal_priority': 2,
                         'signal_time': pd.Timestamp(x.iloc[j]['Date']).strftime('%Y-%m-%d %H:%M'),
-                        'signal_detail': f'30m低點跌破前低後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 收回前高 {trigger_high:.2f}',
+                        'signal_detail': f'30M低點跌破前低後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 收回前高 {trigger_high:.2f}',
                     }
                     best = cand if best is None or cand['signal_priority'] > best['signal_priority'] else best
                     break
 
-        # 30m 震倉後回前高
+        # 30M 震倉後回前高
         body_low = min(float(x.iloc[i]['Open']), close_i)
         wick_ratio = ((body_low - low_i) / body_low) if body_low > 0 else 0.0
         if low_i < prev_low * 0.997 and wick_ratio >= 0.003:
-            for j in range(i, min(len(x), i + 9)):
+            for j in range(i, min(len(x), i + 9, anchor_idx + 6)):
                 close_j = float(x.iloc[j]['Close'])
                 if close_j >= prev_high * 0.998:
                     cand = {
                         'has_30m_signal': True,
-                        'signal_type': '30m震倉後回前高',
+                        'signal_type': '30M震倉後回前高',
                         'signal_priority': 1,
                         'signal_time': pd.Timestamp(x.iloc[j]['Date']).strftime('%Y-%m-%d %H:%M'),
-                        'signal_detail': f'30m震倉下插後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 收回前高 {prev_high:.2f}',
+                        'signal_detail': f'30M震倉下插後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 收回前高 {prev_high:.2f}',
                     }
                     if best is None or cand['signal_priority'] > best['signal_priority']:
                         best = cand
@@ -389,14 +417,23 @@ def analyze_intraday_30m_short_signal(df30: pd.DataFrame, pullback_date: str | N
     if pullback_date:
         try:
             cutoff = pd.Timestamp(str(pullback_date))
-            x = x[x['Date'] >= cutoff].reset_index(drop=True)
+            anchor_candidates = x.index[x['Date'] >= cutoff].tolist()
+            if not anchor_candidates:
+                return result
+            anchor_idx = anchor_candidates[0]
+            left = max(0, anchor_idx - 6)
+            right = min(len(x), anchor_idx + 6)
+            x = x.iloc[left:right].reset_index(drop=True)
+            anchor_idx = anchor_idx - left
         except Exception:
-            pass
-    if len(x) < 12:
+            anchor_idx = 6
+    else:
+        anchor_idx = 6
+    if len(x) < 8:
         return result
 
     best = None
-    for i in range(6, len(x)):
+    for i in range(max(6, anchor_idx), len(x)):
         base = x.iloc[max(0, i - 6):i]
         if len(base) < 4:
             continue
@@ -405,35 +442,35 @@ def analyze_intraday_30m_short_signal(df30: pd.DataFrame, pullback_date: str | N
         high_i = float(x.iloc[i]['High'])
         close_i = float(x.iloc[i]['Close'])
 
-        # 30m 假突破後回前低
+        # 30M 假突破後回前低
         if high_i > prev_high * 1.002 and close_i <= prev_high:
             trigger_low = min(prev_low, float(x.iloc[i]['Low']))
-            for j in range(i, min(len(x), i + 7)):
+            for j in range(i, min(len(x), i + 7, anchor_idx + 6)):
                 close_j = float(x.iloc[j]['Close'])
                 if close_j <= trigger_low * 1.002:
                     cand = {
                         'has_30m_signal': True,
-                        'signal_type': '30m假突破回前低',
+                        'signal_type': '30M假突破回前低',
                         'signal_priority': 2,
                         'signal_time': pd.Timestamp(x.iloc[j]['Date']).strftime('%Y-%m-%d %H:%M'),
-                        'signal_detail': f'30m高點假突破前高後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 跌回前低 {trigger_low:.2f}',
+                        'signal_detail': f'30M高點假突破前高後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 跌回前低 {trigger_low:.2f}',
                     }
                     best = cand if best is None or cand['signal_priority'] > best['signal_priority'] else best
                     break
 
-        # 30m 上插震倉後回前低
+        # 30M 上插震倉後回前低
         body_high = max(float(x.iloc[i]['Open']), close_i)
         wick_ratio = ((high_i - body_high) / body_high) if body_high > 0 else 0.0
         if high_i > prev_high * 1.003 and wick_ratio >= 0.003:
-            for j in range(i, min(len(x), i + 9)):
+            for j in range(i, min(len(x), i + 9, anchor_idx + 6)):
                 close_j = float(x.iloc[j]['Close'])
                 if close_j <= prev_low * 1.002:
                     cand = {
                         'has_30m_signal': True,
-                        'signal_type': '30m上插震倉後回前低',
+                        'signal_type': '30M上插震倉後回前低',
                         'signal_priority': 1,
                         'signal_time': pd.Timestamp(x.iloc[j]['Date']).strftime('%Y-%m-%d %H:%M'),
-                        'signal_detail': f'30m上插震倉後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 跌回前低 {prev_low:.2f}',
+                        'signal_detail': f'30M上插震倉後，{pd.Timestamp(x.iloc[j]["Date"]).strftime("%m-%d %H:%M")} 跌回前低 {prev_low:.2f}',
                     }
                     if best is None or cand['signal_priority'] > best['signal_priority']:
                         best = cand
@@ -450,7 +487,7 @@ def enrich_rows_with_intraday_30m(rows: list[dict], stderr_path: str) -> list[di
         return rows
     intraday, misses = download_bars(
         list(symbol_map.keys()),
-        '1mo',
+        '60d',
         stderr_path,
         batch=20,
         phase='INTRADAY30M',
@@ -472,6 +509,11 @@ def enrich_rows_with_intraday_30m(rows: list[dict], stderr_path: str) -> list[di
         row['intraday_30m_signal_time'] = signal.get('signal_time')
         row['intraday_30m_priority'] = int(signal.get('signal_priority', 0) or 0)
         row['intraday_30m_detail'] = signal.get('signal_detail', '')
+        row['confirm_5d_signal'] = signal
+        row['confirm_5d_status'] = row['intraday_30m_status']
+        row['confirm_5d_signal_time'] = row['intraday_30m_signal_time']
+        row['confirm_5d_priority'] = row['intraday_30m_priority']
+        row['confirm_5d_detail'] = row['intraday_30m_detail']
         if signal.get('has_30m_signal'):
             row['score'] = round(float(row.get('score', 0.0)) + 18 + signal['signal_priority'] * 6, 1)
         needs_intraday_reversal = bool(row.get('needs_intraday_reversal'))
@@ -1059,7 +1101,7 @@ def build_long_pullback_after_double_top(symbol, df, top1_idx, top2_idx, valley_
             volume_feature='回調量縮' if vol_shrink else '一般',
             slowdown_feature='回調減速' if slowdown >= 1 else '回調正常',
             score=score,
-            logic='先找雙頂，再以雙頂之間的主升段低點到第二頂高點量度回調；若第二頂後先出現一段明顯下跌，之後回踩0.5-0.618並靠近籌碼/平台，且1-5日內重新轉強，視作右側回調買點。',
+            logic='先找雙頂，再以雙頂之間的主升段低點到第二頂高點量度回調；若第二頂後先出現一段明顯下跌，之後回踩0.5-0.618並靠近籌碼/平台，且30M重新轉強，視作右側回調買點。',
             recent_windows=[],
         )
         candidate.update({
@@ -1260,7 +1302,7 @@ def build_short_right_shoulder_after_double_bottom(symbol, df, low1_idx, low2_id
             volume_feature='回抽量縮' if vol_shrink else '一般',
             slowdown_feature='回抽減速' if slowdown >= 1 else '回抽正常',
             score=score,
-            logic='先找雙底，再以雙底之間的主要跌段高點到第二底低點量度回抽；若後續反彈只到0.5-0.618、靠近籌碼/平台且1-5日內重新跌破短升勢，視作右肩回調賣點。',
+            logic='先找雙底，再以雙底之間的主要跌段高點到第二底低點量度回抽；若後續反彈只到0.5-0.618、靠近籌碼/平台且30M重新跌破短升勢，視作右肩回調賣點。',
             recent_windows=[],
         )
         candidate.update({
@@ -1355,7 +1397,7 @@ def clone_row_for_liquidity_band(row, band_key):
 
 def render_markdown_report(out: dict) -> str:
     lines = []
-    lines.append("# 美股雙頂→破底翻→回調買點簡報")
+    lines.append("# 美股雙頂→破底翻→回調買點簡報（週線版）")
     lines.append("")
     miss_total = int(out.get('stage1_misses', 0)) + int(out.get('stage2_misses', 0))
     miss_note = f"；数据下载失败 {miss_total} 个" if miss_total else ""
@@ -1370,7 +1412,7 @@ def render_markdown_report(out: dict) -> str:
     lines.append("")
     top10 = out.get('top10', []) or []
     if not top10:
-        lines.append("今日無符合『雙頂後破底翻成立，再等 0.5-0.618 回調共振買點』條件的標的。")
+        lines.append("今日無符合『雙頂後破底翻成立，再等 0.5-0.618 回調共振買點（週線版）』條件的標的。")
         if out.get('stderr_log'):
             lines.append("")
             lines.append(f"日志：`{out['stderr_log']}`")
@@ -1414,6 +1456,7 @@ def scan_stage2_dataset(stage2, mapped, stderr_path):
     for ys, df in stage2.items():
         try:
             df = df.dropna(subset=['Open', 'High', 'Low', 'Close', 'Volume']).reset_index(drop=True)
+            df = resample_to_weekly(df)
             if len(df) < 120:
                 continue
             long_r = scan_long(mapped[ys], df)
@@ -1733,7 +1776,7 @@ def scan_long(symbol, df):
         if double_top_gap >= 60:
             score += LONG_SPAN_BONUS
 
-        logic = '先找兩個相隔至少20日、頂價差2%內的明顯雙頂；雙頂之間不可出現更高價，第二頂後不可再跌破谷底；其後等待結構確認與趨勢線突破，最後只做回踩0.5-0.618且有籌碼密集區/平台/前高/支撐線共振的第二買點；回調後可用日線重新轉強或同日30m反轉確認。'
+        logic = '先找兩個相隔至少20日、頂價差2%內的明顯雙頂；雙頂之間不可出現更高價，第二頂後不可再跌破谷底；其後等待結構確認與趨勢線突破，最後只做回踩0.5-0.618且有籌碼密集區/平台/前高/支撐線共振的第二買點；回調後可用週線重新轉強或30M反轉確認。'
         candidate = make_result(
             symbol=symbol,
             direction='做多',
@@ -2091,7 +2134,7 @@ def scan_short(symbol, df):
         if double_bottom_gap >= 60:
             score += LONG_SPAN_BONUS
 
-        logic = '先找兩個相隔至少20日、底價差2%內的明顯雙底；雙底之間不可出現更低價，第二底後不可再升破峰頂；其後等待結構確認與跌破近期上升趨勢線，最後只做回抽0.5-0.618且有籌碼密集區/平台/前低/阻力線共振的第二賣點；回抽後可用日線重新轉弱或同日30m反轉確認。'
+        logic = '先找兩個相隔至少20日、底價差2%內的明顯雙底；雙底之間不可出現更低價，第二底後不可再升破峰頂；其後等待結構確認與跌破近期上升趨勢線，最後只做回抽0.5-0.618且有籌碼密集區/平台/前低/阻力線共振的第二賣點；回抽後可用週線重新轉弱或30M反轉確認。'
         candidate = make_result(
             symbol=symbol,
             direction='做空',
@@ -2211,7 +2254,7 @@ def main():
 
     for shard_idx, shard_symbols in enumerate(shard_lists, start=1):
         append_log(stderr_path, f"STAGE2_SHARD_START shard={shard_idx}/{len(shard_lists)} symbols={len(shard_symbols)}")
-        stage2, shard_miss = download_bars(shard_symbols, '8mo', stderr_path, batch=args.stage2_batch, phase=f'STAGE2_SHARD_{shard_idx:02d}')
+        stage2, shard_miss = download_bars(shard_symbols, '5y', stderr_path, batch=args.stage2_batch, phase=f'STAGE2_SHARD_{shard_idx:02d}')
         shard_results, shard_long, shard_short = scan_stage2_dataset(stage2, mapped, stderr_path)
         deep_scan_count += len(stage2)
         miss2.update(shard_miss)
@@ -2244,7 +2287,7 @@ def main():
         )
 
     enrich_rows_with_intraday_30m(results, stderr_path)
-    results.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', 0), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+    results.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', x.get('confirm_5d_priority', 0)), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
     deduped = []
     seen_symbols = set()
     for row in results:
@@ -2266,8 +2309,8 @@ def main():
         if row_50m_plus:
             band_rows_50m_plus.append(row_50m_plus)
 
-    band_rows_20m_to_50m.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', 0), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
-    band_rows_50m_plus.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', 0), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+    band_rows_20m_to_50m.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', x.get('confirm_5d_priority', 0)), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+    band_rows_50m_plus.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', x.get('confirm_5d_priority', 0)), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
 
     top10_long_20m_to_50m = [row for row in band_rows_20m_to_50m if row['direction'] == '做多'][:10]
     top10_short_20m_to_50m = [row for row in band_rows_20m_to_50m if row['direction'] == '做空'][:10]
@@ -2279,8 +2322,8 @@ def main():
         'data_sources': [
             'Nasdaq Trader nasdaqlisted.txt',
             'Nasdaq Trader otherlisted.txt',
-            'Yahoo Finance / yfinance 日线 OHLCV',
-            'Yahoo Finance / yfinance 30分鐘 OHLCV（盤中 30m 反應優先排序）',
+            'Yahoo Finance / yfinance 週線 OHLCV（主掃描）',
+            'Yahoo Finance / yfinance 30m OHLCV（30M反應確認）',
             '回調日過去20個交易日平均交易額分組（2000萬-5000萬美元；5000萬美元以上）',
         ],
         'universe_total': int(len(original_symbols)),

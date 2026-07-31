@@ -2,7 +2,7 @@
 
 這個 repo 名稱沿用舊包裝，方便你直接覆蓋原本的 **us head shoulder** 版本；但目前最新版核心邏輯已同步為：
 
-**美股「雙頂 → 破底翻 → 回調買點」掃描模板**
+**美股「雙頂 → 破底翻 → 回調買點」週線掃描模板**
 
 不是硬找 textbook 頭肩底，而是把交易邏輯拆成可維護的 4 段：
 
@@ -40,13 +40,13 @@
 - 若跌穿 **0.618**，但 **5 日內收回 0.618 上方**，也算合格
 - 回調位左方優先有 **籌碼密集區**；沒有的話，也至少要有平台區 / 前高 / 支撐線其一
 - 越多共振，分數越高；其中 **籌碼密集區權重最高**
-- 到達回調區後，若日線重新轉強 / 轉弱，或當日 **30 分鐘圖** 出現反轉結構，也視作有效確認；排序改為**先看回調日，再看 30m**
+- 到達回調區後，若**週線**重新轉強 / 轉弱，或回調日同日 / 其後鄰近時段的 **30M** 出現反轉結構，也視作有效確認；排序改為**先看回調日，再看 30M**
 - 若做多主路徑未形成標準「破底翻→突破確認」，會額外補一條對稱 fallback：**雙頂後先走出一段急跌，再回踩主升段 0.5-0.618 後重新轉強**，標記為 `雙頂→右側回調買點`
 - 做空則保留原本 fallback：**雙底後先走出一段急升，再回抽大跌段 0.5-0.618 後重新轉弱**，標記為 `雙底→右肩回調賣點`
 
 ## 榜單顯示
 
-- 總標題改為：`美股右肩打頂底`
+- 總標題改為：`美股右肩打頂底（週線版）`
 - 榜單同時保留：
   - `回調買`：`代碼 / 回調日 / 30M反應`
   - `回調賣`：`代碼 / 回調日 / 30M反應`
@@ -77,13 +77,13 @@
 - 近期下降趨勢線 lookback：`30`
 ## 補充條件
 - 若雙頂 / 雙底相隔 **60 個交易日以上**，視作額外加分
-- 回調後的重新轉強 / 轉弱，不一定要日線收盤突破 / 跌破前一日高低；**同日 30m 反轉** 也可視作有效確認
+- 回調後的重新轉強 / 轉弱，不一定要週線當週立即轉向；**回調週後 5 個交易日內的日線反轉** 也可視作有效確認
 
 ## 规则文档
 - `docs/double-top-breakdown-reclaim-spec.md`：完整規則文檔，適合給程序員/AI直接實作或繼續迭代
 
 ## 目录结构
-- `us_pattern_scan.py`：主扫描程序（已同步支援回調買 / 回調賣，且 30m 反應為 long / short 對稱邏輯）
+- `us_pattern_scan.py`：主扫描程序（主掃描為週線；30M反應為 long / short 對稱邏輯）
 - `scripts/run_scan.sh`：运行入口（先切 universe、多 worker 並發；每個 worker 自己做 stage1 + stage2）
 - `scripts/render_report.py`：把 JSON 渲染成 Markdown 简报
 - `scripts/update_symbol_universe.py`：每月更新美股股票池與預先排除清單
@@ -125,7 +125,7 @@ bash scripts/run_scan.sh
 HERMES_SCAN_UNIVERSE_SHARDS=18
 HERMES_SCAN_WORKER_CONCURRENCY=6
 HERMES_SCAN_STAGE2_SHARDS_PER_WORKER=1
-HERMES_SCAN_STAGE1_PERIOD=1mo
+HERMES_SCAN_STAGE1_PERIOD=1mo  # stage1 仍為日線流動性預篩
 HERMES_SCAN_STAGE1_BATCH=120
 HERMES_SCAN_STAGE2_BATCH=100
 HERMES_SCAN_WORKER_STAGGER=0.5
@@ -162,7 +162,7 @@ Prepared universe: 1234 symbols (pre-filter 8765, manual excludes 10, generated 
 ### 手动试跑
 1. 把整个仓库 push 到 GitHub
 2. 打开仓库 `Actions`
-3. 选择 `us-head-shoulder-bottom-scan`
+3. 选择 `us-head-shoulder-bottom-scan (週線版)`
 4. 点击 `Run workflow`
 5. 默认全量扫描；只想 smoke test 可填 `max_symbols=200`
 
@@ -171,19 +171,19 @@ Prepared universe: 1234 symbols (pre-filter 8765, manual excludes 10, generated 
 
 ## 产物
 每次运行会产出：
-- `head_shoulder_scan.md`
-- `head_shoulder_scan.json`
-- `head_shoulder_scan.stderr.log`
-- `liquid_symbols.json`
+- `weekly_pullback_scan.md`
+- `weekly_pullback_scan.json`
+- `weekly_pullback_scan.stderr.log`
+- `weekly_liquid_symbols.json`
 - `artifacts/` worker 目录与分片 JSON
 
-> 檔名先沿用舊版 head_shoulder 命名，方便你無痛替換既有 workflow / webhook / 打包流程。
+> 檔名已改成全英文 `weekly_*` 風格，方便與週線版區分。
 
 ## Discord 推送
 如果 GitHub Actions secret 已配置：
 - `DISCORD_WEBHOOK_URL`
 
-workflow 跑完後會自動把最新 `head_shoulder_scan.md` 發到對應 Discord webhook 頻道。
+workflow 跑完後會自動把最新 `weekly_pullback_scan.md` 發到對應 Discord webhook 頻道。
 
 ## 当前交付说明
 這版是 **在最新 us head shoulder 包上同步的新規則版本**：
@@ -191,3 +191,10 @@ workflow 跑完後會自動把最新 `head_shoulder_scan.md` 發到對應 Discor
 - 已改成美股版 **雙頂→破底翻→回調買點**
 - 已同步報表標題、欄位、README 與規格文檔
 - 已同步為 long / short 雙榜板塊（回調買 + 回調賣）
+
+
+## 週線版補充
+- Stage1 流動性預篩仍沿用日線成交額。
+- Stage2 主掃描改為週線結構。
+- 回調後確認已改回 **30M 反應**，不再使用「5 個交易日內日線反轉確認」。
+- 深掃歷史下載期已改為 `5y`，以支援週線結構長度。

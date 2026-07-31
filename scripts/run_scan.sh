@@ -9,11 +9,11 @@ mkdir -p "$OUT_DIR"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="$OUT_DIR/$STAMP"
 ARTIFACT_ROOT="$RUN_DIR/artifacts"
-JSON_PATH="$RUN_DIR/head_shoulder_scan.json"
-MD_PATH="$RUN_DIR/head_shoulder_scan.md"
-COMBINED_STAGE1="$RUN_DIR/liquid_symbols.json"
+JSON_PATH="$RUN_DIR/weekly_pullback_scan.json"
+MD_PATH="$RUN_DIR/weekly_pullback_scan.md"
+COMBINED_STAGE1="$RUN_DIR/weekly_liquid_symbols.json"
 FINAL_DIR="$RUN_DIR/final"
-COMBINED_STDERR="$RUN_DIR/head_shoulder_scan.stderr.log"
+COMBINED_STDERR="$RUN_DIR/weekly_pullback_scan.stderr.log"
 mkdir -p "$ARTIFACT_ROOT" "$FINAL_DIR"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
@@ -146,7 +146,7 @@ worker_index = int(os.environ['WORKER_INDEX'])
 worker_total = int(os.environ.get('WORKER_TOTAL', '1'))
 worker_dir = Path(os.environ['WORKER_DIR'])
 symbols_file = Path(os.environ['SYMBOLS_FILE'])
-stderr_path = worker_dir / 'head_shoulder_scan.stderr.log'
+stderr_path = worker_dir / 'weekly_pullback_scan.stderr.log'
 original_symbols = [line.strip() for line in symbols_file.read_text(encoding='utf-8').splitlines() if line.strip()]
 mapped = {scan.yahoo_symbol(sym): sym for sym in original_symbols}
 yahoo_symbols = list(mapped.keys())
@@ -190,7 +190,7 @@ miss2 = set()
 shard_summaries = []
 for local_shard_idx, shard_symbols in enumerate(scan.split_into_shards(liquid, per_worker_stage2_shards), start=1):
     scan.append_log(str(stderr_path), f"WORKER_STAGE2_SHARD_START worker={worker_index}/{worker_total} shard={local_shard_idx}/{per_worker_stage2_shards} symbols={len(shard_symbols)}")
-    stage2, shard_miss = scan.download_bars(shard_symbols, '8mo', str(stderr_path), batch=stage2_batch, phase=f'WORKER_{worker_index:02d}_STAGE2_SHARD_{local_shard_idx:02d}')
+    stage2, shard_miss = scan.download_bars(shard_symbols, '5y', str(stderr_path), batch=stage2_batch, phase=f'WORKER_{worker_index:02d}_STAGE2_SHARD_{local_shard_idx:02d}')
     shard_results, shard_long, shard_short = scan.scan_stage2_dataset(stage2, mapped, str(stderr_path))
     deep_scan_count += len(stage2)
     miss2.update(shard_miss)
@@ -295,7 +295,7 @@ for worker_dir in worker_dirs:
                 if sym and sym not in original_seen:
                     original_seen.add(sym)
                     original_symbols.append(sym)
-    stderr_path = worker_dir / 'head_shoulder_scan.stderr.log'
+    stderr_path = worker_dir / 'weekly_pullback_scan.stderr.log'
     if stderr_path.exists():
         stderr_chunks.append(f"===== {worker_dir.name} =====\n" + stderr_path.read_text(encoding='utf-8'))
     worker_name = worker_dir.name
@@ -358,7 +358,7 @@ combined_stderr.write_text('\n\n'.join(stderr_chunks), encoding='utf-8')
 scan.enrich_rows_with_intraday_30m(results, str(combined_stderr))
 long_count = sum(1 for row in results if row.get('direction') == '做多')
 short_count = sum(1 for row in results if row.get('direction') == '做空')
-results.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', 0), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+results.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', x.get('confirm_5d_priority', 0)), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
 deduped = []
 seen_symbols = set()
 for row in results:
@@ -381,8 +381,8 @@ for row in deduped:
     if row_50m_plus:
         band_rows_50m_plus.append(row_50m_plus)
 
-band_rows_20m_to_50m.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', 0), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
-band_rows_50m_plus.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', 0), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+band_rows_20m_to_50m.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', x.get('confirm_5d_priority', 0)), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+band_rows_50m_plus.sort(key=lambda x: (x['_sort_pullback'], x.get('intraday_30m_priority', x.get('confirm_5d_priority', 0)), x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
 
 top10_long_20m_to_50m = [row for row in band_rows_20m_to_50m if row['direction'] == '做多'][:10]
 top10_short_20m_to_50m = [row for row in band_rows_20m_to_50m if row['direction'] == '做空'][:10]
@@ -393,8 +393,8 @@ out = {
     'generated_at_utc': datetime.now(timezone.utc).isoformat(),
     'data_sources': [
         'Nasdaq Trader 月更股票池快取（含 Yahoo-friendly universe filter）',
-        'Yahoo Finance / yfinance 日線 OHLCV',
-        'Yahoo Finance / yfinance 30分鐘 OHLCV（盤中買點優先排序）',
+        'Yahoo Finance / yfinance 週線 OHLCV（主掃描）',
+        'Yahoo Finance / yfinance 30m OHLCV（30M反應確認）',
         '回調日過去20個交易日平均交易額分組（2000萬-5000萬美元；5000萬美元以上）',
     ],
     'universe_total': int(len(original_symbols)),
@@ -429,8 +429,8 @@ print(json.dumps({
 }, ensure_ascii=False, indent=2))
 PY
 
-JSON_FINAL_PATH="$FINAL_DIR/head_shoulder_scan.json"
-MD_FINAL_PATH="$FINAL_DIR/head_shoulder_scan.md"
+JSON_FINAL_PATH="$FINAL_DIR/weekly_pullback_scan.json"
+MD_FINAL_PATH="$FINAL_DIR/weekly_pullback_scan.md"
 cp "$JSON_PATH" "$JSON_FINAL_PATH"
 "$PYTHON_BIN" "$ROOT_DIR/scripts/render_report.py" "$JSON_FINAL_PATH" "$MD_FINAL_PATH"
 cp "$MD_FINAL_PATH" "$MD_PATH"

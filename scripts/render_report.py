@@ -10,7 +10,8 @@ def render(out: dict) -> str:
     report_date = generated_at[5:10] if len(generated_at) >= 10 else '未知'
     data_sources = out.get('data_sources') or [
         'Nasdaq Trader 月更股票池快取',
-        'Yahoo Finance / yfinance 日線 OHLCV',
+        'Yahoo Finance / yfinance 週線 OHLCV（主掃描）',
+        'Yahoo Finance / yfinance 30m OHLCV（30M反應確認）',
     ]
     data_sources = [str(x).replace('日线', '日線').replace('数据', '數據').replace('代码', '代碼') for x in data_sources]
 
@@ -63,7 +64,7 @@ def render(out: dict) -> str:
                     '序': f'{idx:02d}',
                     '代碼': str(row.get('symbol', '')),
                     '回調日': display_dates(row),
-                    '30M反應': str(row.get('intraday_30m_status', '-') or '-'),
+                    '30M反應': str(row.get('intraday_30m_status', row.get('confirm_5d_status', '-')) or '-'),
                 })
         else:
             body.append({'序': '--', '代碼': '無', '回調日': '-', '30M反應': '-'})
@@ -86,14 +87,14 @@ def render(out: dict) -> str:
         lines.append(build_text_table(rows, side))
         lines.append('')
 
-    lines.append('📊 美股右肩打頂底')
+    lines.append('📊 美股右肩打頂底（週線版）')
     lines.append('')
     lines.append(f"🗂️ 數據來源：{'；'.join(data_sources)}")
     lines.append(f'📅 數據日期：{report_date}')
     lines.append('')
 
     if not all_rows:
-        lines.append('⚪ 今日無符合右肩打頂底條件、且回調/回抽日過去20日平均交易額達2000萬美元以上的標的。')
+        lines.append('⚪ 今日無符合右肩打頂底（週線版）條件、且回調/回抽日過去20日平均交易額達2000萬美元以上的標的。')
         lines.append('')
         lines.append('⚠️ 風險提示：這是AI掃描出的參考買賣點，不涉及投資建議，需自行確認進出場與止損。')
         return '\n'.join(lines)
