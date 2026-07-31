@@ -1,0 +1,12 @@
+{
+  "generated_at_utc": "2026-07-06T12:00:00Z",
+  "data_sources": ["Yahoo Finance / yfinance 日線 OHLCV"],
+  "top10_long_50m_plus": [
+    {"symbol": "AAPL", "pullback_date": "2026-07-03"}
+  ],
+  "top10_short_50m_plus": [
+    {"symbol": "TSLA", "pullback_date": "2026-07-02"}
+  ],
+  "top10_long_10m_to_50m": [],
+  "top10_short_10m_to_50m": []
+}
