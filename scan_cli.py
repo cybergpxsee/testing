@@ -25,6 +25,7 @@ from us_pattern_scan import (
     make_result, clone_row_for_liquidity_band,
     render_markdown_report,
     aggregate_shard_results,
+    get_exclusion_lists,  # 新增导入
 )
 
 
@@ -99,39 +100,14 @@ def run_scan(
         )
         uni = uni[uni['keep']].copy()
         
-        # ---- New: Load and apply exclusion pool ----
-        ROOT = Path(__file__).resolve().parents[1]
-        
-        # Load manual exclusions
-        manual_exclude_path = ROOT / 'config' / 'exclude_symbols.txt'
-        manual_exclusions = set()
-        if manual_exclude_path.exists():
-            for raw in manual_exclude_path.read_text(encoding='utf-8').splitlines():
-                line = raw.strip().upper()
-                if line and not line.startswith('#'):
-                    manual_exclusions.add(line)
-                    manual_exclusions.add(line.replace('-', '.'))
-                    manual_exclusions.add(line.replace('.', '-'))
-        
-        # Load monthly exclusions
-        monthly_exclude_path = ROOT / 'data' / 'universe' / 'monthly_excluded_symbols.json'
-        monthly_exclusions = set()
-        if monthly_exclude_path.exists():
-            payload = json.loads(monthly_exclude_path.read_text(encoding='utf-8'))
-            for sym in payload.get('generated_symbols', []):
-                sym = str(sym).strip().upper()
-                if sym:
-                    monthly_exclusions.add(sym)
-                    monthly_exclusions.add(sym.replace('-', '.'))
-                    monthly_exclusions.add(sym.replace('.', '-'))
-        
+        # ---- 使用远程排除列表（回退本地） ----
+        manual_exclusions, monthly_exclusions = get_exclusion_lists()
         all_exclusions = manual_exclusions | monthly_exclusions
         pre_filter_count = len(uni)
         if all_exclusions:
             uni = uni[~uni['Symbol'].isin(all_exclusions)].copy()
-            append_log(f"Excluded {pre_filter_count - len(uni)} symbols using manual+monthly exclusion lists")
-        
-        # ---- Exclusion pool loading complete ----
+            append_log(f"Excluded {pre_filter_count - len(uni)} symbols using manual+monthly exclusion lists (remote + fallback)")
+        # ---------------------------------------
         
         if max_symbols and max_symbols > 0:
             uni = uni.head(max_symbols).copy()
