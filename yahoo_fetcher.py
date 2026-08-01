@@ -79,6 +79,7 @@ def download_bars(
     batch: int = 200,
     phase: str = "DOWNLOAD",
     interval: str = "1d",
+    prefer_backend: str = "yfinance",
 ) -> tuple[dict[str, pd.DataFrame], set[str]]:
     """
     Download daily bars using yfinance batch mode (old working approach).
