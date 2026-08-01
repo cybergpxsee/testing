@@ -1,74 +1,162 @@
-# cache_utils.py
+"""
+Cache module for US Pullback Scanner.
+Provides local parquet caching for downloaded bars.
+"""
 import os
-import time
 import hashlib
+import time
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict, Optional, Tuple, List
 import pandas as pd
+from config import get_cache_config
+
 
 class BarCache:
-    def __init__(self, cache_dir=".cache/bars", max_age_days=30, enabled=True):
-        self.cache_dir = Path(cache_dir)
-        self.max_age_seconds = max_age_days * 86400
-        self.enabled = enabled
-        if self.enabled:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    def _get_cache_path(self, symbol: str, period: str) -> Path:
-        safe = symbol.replace('.', '-').replace('/', '_')
-        key = f"{safe}_{period}"
+    """Local parquet cache for downloaded bars."""
+    
+    def __init__(self, cache_dir: Optional[str] = None, max_age_days: int = 30):
+        """
+        Initialize cache.
+        
+        Args:
+            cache_dir: Directory for cache files (default from config)
+            max_age_days: Max age of cache files in days
+        """
+        cache_config = get_cache_config()
+        
+        self.cache_dir = Path(cache_dir or cache_config.get('bars_dir', '.cache/bars'))
+        self.max_age_days = max_age_days
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.enabled = cache_config.get('enabled', True)
+    
+    def _get_cache_key(self, symbol: str, period: str) -> str:
+        """Generate cache filename from symbol and period."""
+        # Use hash to avoid filesystem issues with special characters
+        key = f"{symbol}_{period}"
         hash_suffix = hashlib.md5(key.encode()).hexdigest()[:8]
-        return self.cache_dir / f"{safe}_{period}_{hash_suffix}.parquet"
-
+        safe_symbol = symbol.replace('.', '-').replace('/', '-').replace('\\', '-')
+        return f"{safe_symbol}_{period}_{hash_suffix}.parquet"
+    
+    def _get_cache_path(self, symbol: str, period: str) -> Path:
+        """Get full cache file path."""
+        return self.cache_dir / self._get_cache_key(symbol, period)
+    
     def get(self, symbol: str, period: str) -> Optional[pd.DataFrame]:
+        """
+        Get cached bars if available and not expired.
+        
+        Args:
+            symbol: Stock symbol
+            period: Data period (e.g., '1mo', '1y')
+            
+        Returns:
+            DataFrame if cached and valid, None otherwise
+        """
         if not self.enabled:
             return None
-        path = self._get_cache_path(symbol, period)
-        if not path.exists():
+            
+        cache_path = self._get_cache_path(symbol, period)
+        
+        if not cache_path.exists():
             return None
-        age = time.time() - path.stat().st_mtime
-        if age > self.max_age_seconds:
+        
+        # Check age
+        mtime = cache_path.stat().st_mtime
+        age_days = (time.time() - mtime) / 86400
+        if age_days > self.max_age_days:
+            # Remove expired cache
             try:
-                path.unlink()
+                cache_path.unlink()
             except OSError:
                 pass
             return None
+        
         try:
-            df = pd.read_parquet(path)
-            if 'Date' in df.columns:
-                df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
+            df = pd.read_parquet(cache_path)
             return df
         except Exception:
+            # Corrupted cache, remove it
             try:
-                path.unlink()
+                cache_path.unlink()
             except OSError:
                 pass
             return None
-
+    
     def set(self, symbol: str, period: str, df: pd.DataFrame):
-        if not self.enabled or df is None or len(df) == 0:
+        """
+        Save bars to cache.
+        
+        Args:
+            symbol: Stock symbol
+            period: Data period
+            df: DataFrame to cache
+        """
+        if not self.enabled:
             return
-        path = self._get_cache_path(symbol, period)
+            
+        cache_path = self._get_cache_path(symbol, period)
+        
         try:
-            df_copy = df.copy()
-            if 'Date' in df_copy.columns:
-                df_copy['Date'] = df_copy['Date'].dt.strftime('%Y-%m-%d')
-            df_copy.to_parquet(path, index=False)
+            # Ensure required columns
+            required_cols = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
+            if not all(col in df.columns for col in required_cols):
+                return
+            
+            df.to_parquet(cache_path, index=False)
         except Exception:
+            # Silently fail - cache is optional
             pass
-
-    def clear_expired(self):
-        for f in self.cache_dir.glob("*.parquet"):
-            if time.time() - f.stat().st_mtime > self.max_age_seconds:
+    
+    def clear_expired(self) -> int:
+        """Remove all expired cache files. Returns count removed."""
+        removed = 0
+        for cache_file in self.cache_dir.glob('*.parquet'):
+            mtime = cache_file.stat().st_mtime
+            age_days = (time.time() - mtime) / 86400
+            if age_days > self.max_age_days:
                 try:
-                    f.unlink()
+                    cache_file.unlink()
+                    removed += 1
                 except OSError:
                     pass
+        return removed
+    
+    def clear_all(self) -> int:
+        """Remove all cache files. Returns count removed."""
+        removed = 0
+        for cache_file in self.cache_dir.glob('*.parquet'):
+            try:
+                cache_file.unlink()
+                removed += 1
+            except OSError:
+                pass
+        return removed
+    
+    def get_stats(self) -> dict:
+        """Get cache statistics."""
+        files = list(self.cache_dir.glob('*.parquet'))
+        total_size = sum(f.stat().st_size for f in files)
+        return {
+            'file_count': len(files),
+            'total_size_mb': round(total_size / 1024 / 1024, 2),
+            'cache_dir': str(self.cache_dir),
+        }
 
+
+# Global cache instance
 _cache: Optional[BarCache] = None
 
+
 def get_cache() -> BarCache:
+    """Get or create global cache instance."""
     global _cache
     if _cache is None:
         _cache = BarCache()
+    return _cache
+
+
+def init_cache(cache_dir: Optional[str] = None, max_age_days: int = 30) -> BarCache:
+    """Initialize global cache with custom settings."""
+    global _cache
+    _cache = BarCache(cache_dir, max_age_days)
     return _cache
