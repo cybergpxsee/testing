@@ -383,14 +383,17 @@ def score_confirm_day(df, idx, bullish=True):
     avg20_body = avg_body(trailing)
     avg20_vol = float(trailing['Volume'].mean()) if len(trailing) else 0.0
     score = 0.0
+    # 阳/阴实体加3分
     if bullish and row['Close'] > row['Open']:
-        score += 12
+        score += 3
     if (not bullish) and row['Close'] < row['Open']:
-        score += 12
+        score += 3
+    # 实体 > 20日均实体 加3分
     if avg20_body > 0 and body > avg20_body:
-        score += 8
+        score += 3
+    # 成交量 > 20日均量 加3分
     if avg20_vol > 0 and row['Volume'] > avg20_vol:
-        score += 8
+        score += 3
     return score
 
 
@@ -403,17 +406,18 @@ def reference_close_n_trading_days_ago(df, idx, days=DIRECTION_FILTER_DAYS):
 
 def passes_direction_filter_on_idx(df, idx, bullish=True, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT):
     """
-    Direction filter with close position as bonus (not hard filter).
-    For bullish: close in upper 40% gives bonus, relative 5-day gain >= 1% required
-    For bearish: close in lower 40% gives bonus, relative 5-day drop >= 1% required
+    Direction filter as bonus only (not hard filter).
+    For bullish: close in upper 40% gives bonus, relative 5-day gain gives bonus
+    For bearish: close in lower 40% gives bonus, relative 5-day drop gives bonus
+    Returns: (always True, total_bonus)
     """
     ref_close = reference_close_n_trading_days_ago(df, idx, days=days)
     if ref_close is None:
-        return False, 0
+        return True, 0
     current_close = float(df.iloc[idx]['Close'])
     
     bonus = 0
-    # Close position as bonus (not hard filter)
+    # Close position as bonus
     high = float(df.iloc[idx]['High'])
     low = float(df.iloc[idx]['Low'])
     if high > low:
@@ -423,14 +427,15 @@ def passes_direction_filter_on_idx(df, idx, bullish=True, days=DIRECTION_FILTER_
         elif (not bullish) and close_position <= (1 - MIN_CLOSE_POSITION_PCT):
             bonus += 4
     
-    # Traditional direction filter (primary check)
+    # Direction momentum as bonus (not hard filter)
     pct = (current_close / ref_close - 1.0) * 100.0
-    if bullish:
-        passed = pct >= min_pct
-    else:
-        passed = pct <= -min_pct
+    if bullish and pct >= min_pct:
+        bonus += 4  # 方向向上加分
+    elif (not bullish) and pct <= -min_pct:
+        bonus += 4  # 方向向下加分
     
-    return passed, bonus
+    # Always pass, return bonus
+    return True, bonus
 
 
 def trailing_avg_dollar_volume(df, idx, days=5):
@@ -499,10 +504,12 @@ def find_platform_zone(series, around_idx, direction='long'):
     return float(seg.quantile(0.35)), float(seg.quantile(0.65))
 
 
-def find_chip_dense_zone(df, around_idx, lookback=30, bins=24):
+def find_chip_dense_zone(df, around_idx, lookback=90, bins=24):
     """
-    Find chip dense zone with time weighting.
-    Returns: (low, high, mid, time_weight) where time_weight is 1.0 for recent, decaying for older
+    Find chip dense zone with half-life time weighting and width consideration.
+    Returns: (low, high, mid, time_weight, width_score) 
+    time_weight: half-life decay (20-day half-life)
+    width_score: narrower zone = higher score (more concentrated chips)
     """
     left = max(0, around_idx - lookback + 1)
     seg = df.iloc[left:around_idx+1].dropna(subset=['High', 'Low', 'Close', 'Volume'])
@@ -538,23 +545,34 @@ def find_chip_dense_zone(df, around_idx, lookback=30, bins=24):
         return None
     peak_idx = int(np.argmax(weights))
     peak_mid = float((edges[peak_idx] + edges[peak_idx + 1]) / 2.0)
-    width = max((price_high - price_low) / bins * 1.5, peak_mid * 0.006)
     
-    # Calculate time weight based on when peak formed
-    # Find the date of peak formation by finding the bar with max volume in the peak price bin
+    # Calculate zone width and width score (narrower = more concentrated = higher score)
+    bin_width = (price_high - price_low) / bins
+    zone_width = bin_width * 1.5  # effective zone width
+    # Width score: narrower zone = more concentrated chips = higher score
+    # Normalize: ideal narrow width ~ 0.5% of price, max score at 0.2%, zero at 3%
+    ideal_width = peak_mid * 0.005  # 0.5% of price
+    max_width = peak_mid * 0.03   # 3% of price
+    if zone_width <= ideal_width:
+        width_score = 1.0
+    elif zone_width >= max_width:
+        width_score = 0.0
+    else:
+        width_score = 1.0 - (zone_width - ideal_width) / (max_width - ideal_width)
+    width_score = max(0.0, min(1.0, width_score))
+    
+    # Calculate time weight with half-life decay (20-day half-life)
     peak_bin_low = float(edges[peak_idx])
     peak_bin_high = float(edges[peak_idx + 1])
     
-    # Find rows that contributed to this peak bin
     peak_vol_contrib = 0.0
-    peak_date = df.iloc[around_idx]['Date']  # fallback to current date
+    peak_date = df.iloc[around_idx]['Date']
     
     for _, row in seg.iterrows():
         lo = float(row['Low'])
         hi = float(row['High'])
         if not np.isfinite(lo) or not np.isfinite(hi) or hi < lo:
             continue
-        # Check if this bar overlaps with the peak bin
         overlap = max(0.0, min(hi, peak_bin_high) - max(lo, peak_bin_low))
         if overlap > 0:
             span = hi - lo
@@ -564,11 +582,13 @@ def find_chip_dense_zone(df, around_idx, lookback=30, bins=24):
                 peak_vol_contrib = contrib
                 peak_date = row['Date']
     
-    # Weight decreases with age - recent peaks get higher weight
+    # Half-life decay: every 20 days weight halves
     days_ago = (df.iloc[around_idx]['Date'] - peak_date).days if isinstance(peak_date, pd.Timestamp) else 0
-    time_weight = max(0.5, 1.0 - days_ago / 30.0)
+    half_life = 20.0
+    time_weight = 0.5 ** (days_ago / half_life)  # 半衰期衰减
+    time_weight = max(0.1, time_weight)  # 最小保底 0.1
     
-    return peak_mid - width, peak_mid + width, peak_mid, time_weight
+    return peak_mid - zone_width, peak_mid + zone_width, peak_mid, time_weight, width_score
 
 
 def _recent_desc_break_from_anchors(df, confirm_idx, anchors, min_gap=3, overshoot_tol=0.0075):
@@ -759,6 +779,64 @@ def qualifies_reclaim_after_fib_break_short(df, fib618, idx, max_days=5):
     return False, False
 
 
+
+def calc_pullback_depth_bonus(df, peak_idx, pullback_idx, bullish=True):
+    """
+    计算回调深度加分
+    做多: 回调幅度(从波峰到回调低点) / 前段涨幅
+    做空: 回抽幅度(从波谷到回抽高点) / 前段跌幅
+    38.2%~61.8%区间加分，过深(>80%)或过浅(<20%)减分
+    """
+    if bullish:
+        peak_price = float(df.iloc[peak_idx]['High'])
+        pullback_price = float(df.iloc[pullback_idx]['Low'])
+        # Find the start of the upwave (local low before peak)
+        upwave_start_idx = peak_idx
+        for i in range(peak_idx - 1, max(-1, peak_idx - 60), -1):
+            if float(df.iloc[i]['Low']) < float(df.iloc[i+1]['Low']):
+                upwave_start_idx = i
+            else:
+                break
+        upwave_low = float(df.iloc[upwave_start_idx]['Low'])
+        upwave_height = peak_price - upwave_low
+        if upwave_height <= 0:
+            return 0
+        retrace = (peak_price - float(df.iloc[pullback_idx]['Low'])) / upwave_height
+    else:
+        peak_price = float(df.iloc[peak_idx]['Low'])
+        pullback_price = float(df.iloc[pullback_idx]['High'])
+        # Find the start of the downwave (local high before peak)
+        downwave_start_idx = peak_idx
+        for i in range(peak_idx - 1, max(-1, peak_idx - 60), -1):
+            if float(df.iloc[i]['High']) > float(df.iloc[i+1]['High']):
+                downwave_start_idx = i
+            else:
+                break
+        downwave_high = float(df.iloc[downwave_start_idx]['High'])
+        downwave_height = downwave_high - peak_price
+        if downwave_height <= 0:
+            return 0
+        retrace = (float(df.iloc[pullback_idx]['High']) - peak_price) / downwave_height
+    
+    if retrace <= 0:
+        return 0
+    
+    # 38.2%~61.8% 黄金分割区间加分
+    if 0.382 <= retrace <= 0.618:
+        # 在区间中间(0.5)分数最高
+        bonus = 10 * (1 - abs(retrace - 0.5) / 0.118)
+    # 20%~38.2% 或 61.8%~80% 轻微加分
+    elif 0.2 <= retrace < 0.382 or 0.618 < retrace <= 0.8:
+        bonus = 3
+    # 过浅(<20%)或过深(>80%)减分
+    elif retrace < 0.2 or retrace > 0.8:
+        bonus = -5
+    else:
+        bonus = 0
+    
+    return max(-10, min(10, round(bonus, 1)))
+
+
 def nearest_swing_high(df, start_idx, end_idx):
     if end_idx <= start_idx:
         return None
@@ -796,25 +874,27 @@ def get_week52_high_low(df, idx, lookback=WEEK52_LOOKBACK):
 
 
 def calc_week52_proximity_bonus_long(df, pullback_idx):
-    """做多：回調位置越接近52週最低位，加分越高"""
+    """做多：回調位置越接近52週最低位，加分越高；接近52週高點則不加分甚至扣分"""
     if not PULLBACK_20D_FILTER and not WEEK52_PROXIMITY_BONUS_MAX:
         return 0
     high52, low52 = get_week52_high_low(df, pullback_idx)
     if low52 is None:
         return 0
     close = float(df.iloc[pullback_idx]['Close'])
-    # 計算接近度：(close - low52) / (high52 - low52) * 100%
-    # 越接近low52（即比例越小），分數越高
     if high52 == low52:
         return 0
     proximity = (close - low52) / (high52 - low52)
-    # proximity 在 [0, 1] 之間，越接近0(接近low52)分數越高
-    bonus = WEEK52_PROXIMITY_BONUS_MAX * (1 - proximity)
+    # proximity 在 [0, 1]，越接近0(接近low52)分數越高
+    # 非線性映射：平方增強極端接近的區分度
+    bonus = WEEK52_PROXIMITY_BONUS_MAX * (1 - proximity) ** 2
+    # 如果接近52週高點 (proximity > 0.8)，扣分
+    if proximity > 0.8:
+        bonus -= WEEK52_PROXIMITY_BONUS_MAX * (proximity - 0.8) * 2
     return max(0, round(bonus, 1))
 
 
 def calc_week52_proximity_bonus_short(df, pullback_idx):
-    """做空：回抽位置越接近52週最高位，加分越高"""
+    """做空：回抽位置越接近52週最高位，加分越高；接近52週低點則扣分"""
     if not PULLBACK_20D_FILTER and not WEEK52_PROXIMITY_BONUS_MAX:
         return 0
     high52, low52 = get_week52_high_low(df, pullback_idx)
@@ -824,8 +904,12 @@ def calc_week52_proximity_bonus_short(df, pullback_idx):
     if high52 == low52:
         return 0
     proximity = (high52 - close) / (high52 - low52)
-    # proximity 在 [0, 1] 之間，越接近0(接近high52)分數越高
-    bonus = WEEK52_PROXIMITY_BONUS_MAX * (1 - proximity)
+    # proximity 在 [0, 1]，越接近0(接近high52)分數越高
+    # 非線性映射：平方增強極端接近的區分度
+    bonus = WEEK52_PROXIMITY_BONUS_MAX * (1 - proximity) ** 2
+    # 如果接近52週低點 (proximity > 0.8)，扣分 - 避免在絕對低位做空
+    if proximity > 0.8:
+        bonus -= WEEK52_PROXIMITY_BONUS_MAX * (proximity - 0.8) * 2
     return max(0, round(bonus, 1))
 
 
@@ -1120,9 +1204,9 @@ def scan_long(symbol, df, extrema_cache=None):
                 touched_support = (zone_low * 0.985 <= low <= zone_high * 1.015)
                 touched_chip = False
                 if chip_zone:
-                    cl, ch, _, time_weight = chip_zone
+                    cl, ch, _, time_weight, width_score = chip_zone
                     touched_chip = (cl*0.99 <= close <= ch*1.01) or (cl*0.99 <= low <= ch*1.01)
-                    # time_weight is used later when bonus is calculated
+                    # time_weight, width_score used later when bonus is calculated
                 if not (touched_support or touched_chip):
                     continue
                 # local pullback low (recent once)
@@ -1150,7 +1234,8 @@ def scan_long(symbol, df, extrema_cache=None):
                         bonus += 8
                     if touched_chip:
                         time_weight = chip_zone[3] if chip_zone and len(chip_zone) > 3 else 1.0
-                        bonus += 6 * time_weight
+                        width_score = chip_zone[4] if chip_zone and len(chip_zone) > 4 else 0.5
+                        bonus += 6 * time_weight * (0.5 + 0.5 * width_score)  # 宽度越窄加分越高
                     if touched_support and touched_chip:
                         bonus += 4
                     if close >= fib618:
@@ -1206,6 +1291,9 @@ def scan_long(symbol, df, extrema_cache=None):
             # 新增：52週最低位接近度加分
             week52_bonus = calc_week52_proximity_bonus_long(df, recent_pullback)
             score += week52_bonus
+            # 新增：回調深度加分 (38.2%~61.8%加分，过深/过浅减分)
+            pullback_depth_bonus = calc_pullback_depth_bonus(df, wave_high_idx, recent_pullback, bullish=True)
+            score += pullback_depth_bonus
             # 新增：20日均線過濾條件
             if not check_pullback_20d_filter_long(df, recent_pullback):
                 continue
@@ -1351,7 +1439,8 @@ def scan_short(symbol, df, extrema_cache=None):
                         bonus += 8
                     if touched_chip:
                         time_weight = chip_zone[3] if chip_zone and len(chip_zone) > 3 else 1.0
-                        bonus += 6 * time_weight
+                        width_score = chip_zone[4] if chip_zone and len(chip_zone) > 4 else 0.5
+                        bonus += 6 * time_weight * (0.5 + 0.5 * width_score)  # 宽度越窄加分越高
                     if touched_res and touched_chip:
                         bonus += 4
                     if close <= fib618:
@@ -1407,6 +1496,9 @@ def scan_short(symbol, df, extrema_cache=None):
             # 新增：52週最高位接近度加分
             week52_bonus = calc_week52_proximity_bonus_short(df, recent_pullback)
             score += week52_bonus
+            # 新增：回抽深度加分 (38.2%~61.8%加分，过深/过浅减分)
+            pullback_depth_bonus = calc_pullback_depth_bonus(df, wave_low_idx, recent_pullback, bullish=False)
+            score += pullback_depth_bonus
             # 新增：20日均線過濾條件
             if not check_pullback_20d_filter_short(df, recent_pullback):
                 continue

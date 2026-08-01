@@ -1,4 +1,6 @@
-yfinance
-pandas
-numpy
-pyyaml
+yfinance==0.2.51
+pandas==2.2.2
+numpy==1.26.4
+requests==2.32.3
+curl_cffi==0.15.0
+PyYAML==6.0.2
