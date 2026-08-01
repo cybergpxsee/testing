@@ -1294,7 +1294,7 @@ def scan_long(symbol, df):
         return None
     candidates.sort(key=lambda x: (x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
     best = candidates[0]
-    best['recent_windows'] = build_recent_windows(df, all_window_points, bullish=True, max_windows=3, max_gap_days=3)
+    best['recent_windows'] = add_liquidity_band_to_windows(df, build_recent_windows(df, all_window_points, bullish=True, max_windows=3, max_gap_days=3))
     return best
 
 
@@ -1476,7 +1476,7 @@ def scan_short(symbol, df):
         return None
     candidates.sort(key=lambda x: (x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
     best = candidates[0]
-    best['recent_windows'] = build_recent_windows(df, all_window_points, bullish=False, max_windows=3, max_gap_days=3)
+    best['recent_windows'] = add_liquidity_band_to_windows(df, build_recent_windows(df, all_window_points, bullish=False, max_windows=3, max_gap_days=3))
     return best
 
 
