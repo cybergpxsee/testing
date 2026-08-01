@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 import traceback
+import urllib.request
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
@@ -195,9 +196,6 @@ def split_into_shards(seq, shard_count):
             out.append(list(seq[start:end]))
         start = end
     return out
-
-
-
 
 
 def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
@@ -777,7 +775,6 @@ def qualifies_reclaim_after_fib_break_short(df, fib618, idx, max_days=5):
         if bearish_candle or gap_reclaim:
             return True, True
     return False, False
-
 
 
 def calc_pullback_depth_bonus(df, peak_idx, pullback_idx, bullish=True):
@@ -1410,9 +1407,9 @@ def scan_short(symbol, df, extrema_cache=None):
                 touched_res = (zone_low * 0.985 <= high <= zone_high * 1.015)
                 touched_chip = False
                 if chip_zone:
-                    cl, ch, _, time_weight = chip_zone
+                    cl, ch, _, time_weight, width_score = chip_zone
                     touched_chip = (cl*0.99 <= close <= ch*1.01) or (cl*0.99 <= high <= ch*1.01)
-                    # time_weight is used later when bonus is calculated
+                    # time_weight, width_score used later when bonus is calculated
                 if not (touched_res or touched_chip):
                     continue
                 if k+1 < len(df) and high >= float(df.iloc[k-1]['High']) and high >= float(df.iloc[k+1]['High']):
@@ -1532,6 +1529,71 @@ def scan_short(symbol, df, extrema_cache=None):
     return best
 
 
+# ============ 新增：从远程仓库获取排除列表 ============
+def get_exclusion_lists() -> tuple[set, set]:
+    """
+    从远程 GitHub 仓库获取 manual 和 monthly 排除列表。
+    若远程获取失败，则回退到本地文件（保持兼容性）。
+    返回 (manual_exclusions, monthly_exclusions) 两个集合。
+    """
+    REMOTE_BASE = "https://raw.githubusercontent.com/cybergpxsee/data-share/main/data/universe"
+    manual_exclude_url = f"{REMOTE_BASE}/exclude_symbols.txt"
+    monthly_exclude_url = f"{REMOTE_BASE}/monthly_excluded_symbols.json"
+
+    manual_exclusions = set()
+    monthly_exclusions = set()
+
+    # 获取 manual 列表
+    try:
+        req = urllib.request.Request(manual_exclude_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            text = resp.read().decode('utf-8')
+            for line in text.splitlines():
+                line = line.strip().upper()
+                if line and not line.startswith('#'):
+                    manual_exclusions.add(line)
+                    manual_exclusions.add(line.replace('-', '.'))
+                    manual_exclusions.add(line.replace('.', '-'))
+        log_info("Exclusion list loaded from remote: exclude_symbols.txt")
+    except Exception as e:
+        log_warning(f"Failed to fetch manual exclusions from remote, fallback to local: {e}")
+        # 回退到本地文件
+        local_path = Path(__file__).resolve().parent / 'config' / 'exclude_symbols.txt'
+        if local_path.exists():
+            for raw in local_path.read_text(encoding='utf-8').splitlines():
+                line = raw.strip().upper()
+                if line and not line.startswith('#'):
+                    manual_exclusions.add(line)
+                    manual_exclusions.add(line.replace('-', '.'))
+                    manual_exclusions.add(line.replace('.', '-'))
+
+    # 获取 monthly 列表
+    try:
+        req = urllib.request.Request(monthly_exclude_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = json.loads(resp.read().decode('utf-8'))
+            for sym in payload.get('generated_symbols', []):
+                sym = str(sym).strip().upper()
+                if sym:
+                    monthly_exclusions.add(sym)
+                    monthly_exclusions.add(sym.replace('-', '.'))
+                    monthly_exclusions.add(sym.replace('.', '-'))
+        log_info("Exclusion list loaded from remote: monthly_excluded_symbols.json")
+    except Exception as e:
+        log_warning(f"Failed to fetch monthly exclusions from remote, fallback to local: {e}")
+        # 回退到本地文件
+        local_path = Path(__file__).resolve().parent / 'data' / 'universe' / 'monthly_excluded_symbols.json'
+        if local_path.exists():
+            payload = json.loads(local_path.read_text(encoding='utf-8'))
+            for sym in payload.get('generated_symbols', []):
+                sym = str(sym).strip().upper()
+                if sym:
+                    monthly_exclusions.add(sym)
+                    monthly_exclusions.add(sym.replace('-', '.'))
+                    monthly_exclusions.add(sym.replace('.', '-'))
+
+    return manual_exclusions, monthly_exclusions
+# ====================================================
 
 
 def aggregate_shard_results(artifact_dir: str, output_dir: str = '') -> str:
@@ -1671,6 +1733,7 @@ def aggregate_shard_results(artifact_dir: str, output_dir: str = '') -> str:
     from us_pattern_scan import render_markdown_report
     return render_markdown_report(out)
 
+
 def main():
     parser = argparse.ArgumentParser(description='U.S. pullback pattern scan')
     parser.add_argument('--format', choices=['json', 'markdown'], default='json')
@@ -1697,6 +1760,16 @@ def main():
     uni = uni.drop_duplicates(subset=['Symbol']).reset_index(drop=True)
     uni['keep'] = uni.apply(lambda r: is_regular_security(r['Symbol'], r['name'], bool(r['etf']), bool(r['test_issue'])), axis=1)
     uni = uni[uni['keep']].copy()
+
+    # ---- 使用远程排除列表（回退本地） ----
+    manual_exclusions, monthly_exclusions = get_exclusion_lists()
+    all_exclusions = manual_exclusions | monthly_exclusions
+    pre_filter_count = len(uni)
+    if all_exclusions:
+        uni = uni[~uni['Symbol'].isin(all_exclusions)].copy()
+        log_info(f"Excluded {pre_filter_count - len(uni)} symbols using manual+monthly exclusion lists (remote + fallback)")
+    # ---------------------------------------
+
     if args.max_symbols and args.max_symbols > 0:
         uni = uni.head(args.max_symbols).copy()
     original_symbols = uni['Symbol'].tolist()
