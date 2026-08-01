@@ -53,21 +53,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ===== 新增：從共享倉庫拉取月更篩選池 =====
-      - name: Pull shared universe data
-        uses: actions/checkout@v4
-        with:
-          repository: cybergpxsee/data-share
-          path: .tmp/shared-universe
-          fetch-depth: 1
-          # 如果倉庫是私有的，請取消註解並設定 secret：
-          # token: ${{ secrets.PAT_FOR_DATA_SHARE }}
-
-      - name: Copy universe files to local data/universe
-        run: |
-          mkdir -p data/universe
-          cp -r .tmp/shared-universe/data/universe/* data/universe/
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -86,6 +71,7 @@ jobs:
           set -euo pipefail
           UNIVERSE_SHARDS="${{ github.event.inputs.universe_shards || '12' }}"
           WORKER_SHARDS_PER_JOB="${{ github.event.inputs.worker_shards_per_job || '3' }}"
+          # WORKSPACE_DIR is now provided via env
           
           python - <<'PY'
           import json
@@ -101,10 +87,8 @@ jobs:
               trailing_avg_dollar_volume
           )
           
-          # ===== 修改：直接從本地 data/universe 讀取已拉取的檔案 =====
-          nasdaq = parse_nasdaq_listed(open('data/universe/nasdaqlisted.txt', 'r', encoding='utf-8').read())
-          other = parse_other_listed(open('data/universe/otherlisted.txt', 'r', encoding='utf-8').read())
-          
+          nasdaq = parse_nasdaq_listed(fetch_text(NASDAQ_LISTED_URL))
+          other = parse_other_listed(fetch_text(OTHER_LISTED_URL))
           uni = pd.concat([nasdaq, other], ignore_index=True)
           uni = uni.drop_duplicates(subset=['Symbol']).reset_index(drop=True)
           uni['keep'] = uni.apply(
@@ -117,7 +101,7 @@ jobs:
           
           symbols = uni['yahoo_symbol'].tolist()
           
-          # Load exclusion lists from local data/universe
+          # Load exclusion lists
           manual_exclude = set()
           if os.path.exists('config/exclude_symbols.txt'):
               with open('config/exclude_symbols.txt', 'r', encoding='utf-8') as f:
@@ -256,6 +240,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shard files are saved with zero-padded index (e.g., shard_01.json, shard_02.json)
           SHARD_NUM=$(printf "%02d" ${{ matrix.shard_index }})
           SHARD_JSON=".tmp/scan_prepare/shard_${SHARD_NUM}.json"
           SYMBOLS=$(jq -r '.symbols | join(",")' "$SHARD_JSON")
@@ -302,7 +287,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: scan-shard-*
-          merge-multiple: true
+          merge-multiple: false
           path: .tmp/scan_artifacts
 
       - name: Download prepare workspace
@@ -311,9 +296,19 @@ jobs:
           name: scan-prepare
           path: .tmp/scan_prepare
 
-      - name: Copy prepare.json to scan_artifacts for aggregate
+      - name: Flatten shard artifacts for aggregate
         run: |
-          cp .tmp/scan_prepare/prepare.json .tmp/scan_artifacts/prepare.json
+          # Each shard artifact is in .tmp/scan_artifacts/scan-shard-N/shard_01.json
+          # Move all shard_*.json to .tmp/scan_artifacts/ with unique names
+          mkdir -p .tmp/scan_artifacts/flattened
+          for dir in .tmp/scan_artifacts/scan-shard-*/; do
+            shard_num=$(basename "$dir" | sed 's/scan-shard-//')
+            if [ -f "$dir/shard_01.json" ]; then
+              cp "$dir/shard_01.json" ".tmp/scan_artifacts/flattened/shard_${shard_num}.json"
+            fi
+          done
+          # Copy prepare.json
+          cp .tmp/scan_prepare/prepare.json .tmp/scan_artifacts/flattened/prepare.json
 
       - name: Aggregate results
         shell: bash
@@ -321,7 +316,7 @@ jobs:
           set -euo pipefail
           python scripts/scan_cli.py \
             --format markdown \
-            --aggregate .tmp/scan_artifacts \
+            --aggregate .tmp/scan_artifacts/flattened \
             --output output/
 
       - name: Upload output artifacts
