@@ -1,394 +1,239 @@
-# US Pullback Scanner
+# pullback-scan-github-template
 
-美股回調買點 / 回抽賣點掃描器 — 基於 GitHub Actions 自動化執行，支援多 Worker 並發、月更股票池更新、Discord 簡報推送。
+這是把你目前的「回調買上漲的」掃描邏輯遷移到 **GitHub Actions** 自動執行的模板。
 
-## 核心特性
+## 目前已內建的簡報設定
+## 最新策略同步狀態
 
-- **兩階段掃描**：Stage 1 流動性篩選 (1mo) → Stage 2 深度形態掃描 (1y)
-- **多 Worker 並發**：Matrix 策略，支援 18 shards × 6 workers 並發
-- **月更股票池**：自動更新 Nasdaq/OtherListed，過濾低流動性/疑似退市
-- **Discord 簡報**：繁體中文、圖標美化、固定寬度對齊、風險提示
-- **本地緩存優先**：Stock universe / bars 緩存，減少聯網依賴
-- **Yahoo Finance 反封禁**：curl_cffi Chrome 120 指紋 + yfinance 回退 + 退避重試
+- 已同步目前正式任務的掃描規則
+- 局部高低點判定使用 `window=3` 以降低雜訊
+- 近期趨勢線使用最近 `30` 根K，仍為硬條件
+- 長期趨勢線額外查看最近 `90` 根K；若同步突破/跌破，排序加 `+5` 分
+- 簡報全文輸出為**繁體中文**
+- 新版簡報已改成 **圖標美化 + 固定寬度對齊**，方便 Discord / 手機端閱讀
+- 開頭固定列出：`數據來源`、`數據日期`
+- 先按 **回調日過去 20 個交易日平均交易額** 分成兩組：
+  - `過去20日平均交易額：5000萬美元以上`
+  - `過去20日平均交易額：2000萬-5000萬美元`
+- 每一組內再分為：`適合做多前10名`、`適合做空前10名`
+- 表格固定只顯示：`股票代碼 | 做空或做多 | 回調日`
+- `回調日` 不再壓縮成單一最新日期；會優先顯示每檔最近 **3 個 individually 合格窗口日**，格式如：`06-08 / 06-17 / 06-22`
+- 每個窗口只取 1 個代表日：
+  - 做多：窗口內**最低價**那天
+  - 做空：窗口內**最高價**那天
+- **每一個最終顯示出來的回調日，都必須 individually 通過雙重檢查**：
+  - 方向過濾：
+    - 做多：該代表日相對 5 個交易日前，需至少高出 1%
+    - 做空：該代表日相對 5 個交易日前，需至少低出 1%
+  - 流動性過濾：
+    - 該代表日回看過去 20 個交易日平均交易額必須 **>= 2000 萬美元**
+- 不合格的代表日會直接從顯示列表剔除，不是整檔股票一律刪掉
+- 回調/回抽質量採加分制：碰平台位加分、碰籌碼密集區加分，**同時碰平台位 + 籌碼密集區更佳**
+- 同一檔股票如果不同代表日落在不同流動性分組，會按分組拆開顯示
+- 雙底／雙頂母結構有效性：兩腳之間**至少相隔 20 個交易日**；若兩腳之間**相隔 60 個交易日或以上**，分數會額外加分
+- 雙底額外限制：兩個底點之間**不能再出現更低的谷底**，否則該雙底視為失效
+- 雙頂額外限制：兩個頂點之間**不能再出現更高的峰頂**，否則該雙頂視為失效
+- 簡報末尾固定追加：
+  - `風險提示：這是AI掃描出的參考買賣點，不涉及投資建議，做多或做空都有風險`
 
----
+## 安裝
 
-## 掃描邏輯完整流程
+## 目录结构
 
-### 1. Universe 準備 (prepare)
+- `us_pattern_scan.py`：主扫描程序
+- `scripts/run_scan.sh`：运行入口（先切 universe、多 worker 並發；每個 worker 自己做 stage1 + stage2）
+- `scripts/render_report.py`：把 JSON 渲染成 Markdown 简报
+- `scripts/update_symbol_universe.py`：每月更新美股股票池與預先排除清單（支援 `prepare / shard / aggregate`）
+- `.github/workflows/pullback-scan.yml`：GitHub Actions 扫描任务
+- `.github/workflows/update-universe-cache.yml`：每月更新美股股票池與預先排除清單（prepare → matrix shards → aggregate）
+- `data/universe/`：本地股票池快取（`nasdaqlisted.txt`、`otherlisted.txt`、`us_symbols.csv`、`manifest.json`、`monthly_excluded_symbols.json/csv/txt`、`yahoo_bad_symbols.txt`）
+- `output/`：每次运行的产物目录（本地运行时生成；不会 git commit 到仓库）
 
-```
-Nasdaq Trader + OtherListed 官方列表
-    ↓
-解析合併 → 去重 (Symbol)
-    ↓
-Yahoo-friendly 過濾：
-  - 排除 warrant/right/unit/preferred/ETN/NextShares 等
-  - 排除 -V/-WI/-WS/-WD/-U/-R/-RT/-P 等 Yahoo 高風險後綴
-  - 排除已知 bad symbols (yahoo_bad_symbols.txt)
-  - 僅保留 Common Stock / Ordinary Shares / Class A/B
-    ↓
-應用排除池：
-  - config/exclude_symbols.txt (手動黑名單)
-  - data/universe/monthly_excluded_symbols.json (月更低流動性)
-    ↓
-輸出：
-  - data/universe/us_symbols.csv (完整股票池)
-  - shards/shard_01.csv ~ shard_NN.csv (分片)
-  - prepare.json (元數據，含 matrix 給 GitHub Actions)
-```
+## 本地运行
 
-### 2. Stage 1 - 流動性篩選 (1mo, daily)
-
-```
-每個 shard 並發執行：
-    ↓
-下載 1mo daily bars (yfinance batch 模式)
-    ↓
-計算過去 20 個交易日平均成交額
-    ↓
-分組：
-  - 高流動性：≥ $50M (band_high)
-  - 中流動性：$20M ~ $50M (min_avg_dollar_volume_20d)
-  - 低流動性：< $20M → 直接淘汰
-    ↓
-輸出液性分組標記供 Stage 2 使用
-```
-
-### 3. Stage 2 - 深度形態掃描 (1y, daily)
-
-```
-對通過 Stage 1 的股票：
-    ↓
-下載 1y daily bars (已緩存優先)
-    ↓
-計算局部高低點：
-  - Swing Window = 3 (左右各 3 根 K 線)
-  - 局部高點：中間 K 最高，左右各 3 根皆較低
-  - 局部低點：中間 K 最低，左右各 3 根皆較高
-    ↓
-識別雙底 / 雙頂：
-  - 雙底：兩個低點間 ≥ 20 天，第二底不低於第一底，中間有明顯高點
-  - 雙頂：兩個高點間 ≥ 20 天，第二頂不高於第一頂，中間有明顯低點
-  - 寬間隔加分：間隔 ≥ 60 天 → +5 分
-    ↓
-趨勢線判定：
-  - 短期 (30 根 K)：Close > SMA20 + 斜率向上/向下
-  - 長期 (90 根 K)：同步突破/跌破 → 排序加分
-    ↓
-回調/回抽窗口識別：
-  - 做多：局部高點後跌至支撐區 (趨勢線/均線/前高/平台位/籌碼密集區)
-  - 做空：局部低點後漲至壓力區
-    ↓
-代表日選取 (每個合格窗口取 1 天)：
-  - 做多：窗口內 **最低價** 那天
-  - 做空：窗口內 **最高價** 那天
-    ↓
-每個代表日必須獨立通過雙重檢查：
-  1. 方向過濾 (5 個交易日前)：
-     - 做多：漲幅 ≥ 1% (direction_filter_min_pct)
-     - 做空：跌幅 ≥ 1%
-  2. 流動性過濾 (代表日回看 20 日)：
-     - 平均成交額 ≥ $20M
-  3. 確認日新鮮度：
-     - 代表日距今 ≤ 90 天 (PULLBACK_MAX_CONFIRM_AGE_DAYS)
-    ↓
-評分系統：
-  - 基礎分：形態類型 (雙底/雙頂/單邊回調)
-  - 加分項：
-    - 碰平台位 +3
-    - 碰籌碼密集區 +3
-    - 同時碰平台位 + 籌碼密集區 +5
-    - 寬間隔雙底/雙頂 (≥60天) +5
-    - 長期趨勢同步 +5
-  - 減分項：
-    - 破支撐/壓力失效 -10
-    - 成交量不縮減 -3
-```
-
-### 4. 結果聚合與簡報生成
-
-```
-所有 shard 結果合併
-    ↓
-按總分排序 → Top 10 做多 / Top 10 做空
-    ↓
-按流動性分組：
-  - 50M+ 做多
-  - 20M-50M 做多
-  - 50M+ 做空
-  - 20M-50M 做空
-    ↓
-簡報生成 (Markdown)：
-  - 標題：數據來源 + 數據日期
-  - 4 個表格 (做多50M+ / 做多20M-50M / 做空50M+ / 做空20M-50M)
-  - 表格欄位：編號 | 代碼 | 回調日 (最多 3 個，格式 MM-DD / MM-DD / MM-DD) | 總分
-  - 風險提示固定附加
-    ↓
-Discord Embed 發送 (含 Thread 支援)
-```
-
----
-
-## 月更股票池更新 (update-universe-cache.yml)
-
-### 三階段 Matrix 流程
-
-```
-prepare (1 job)
-  ├─ 下載 Nasdaq/OtherListed
-  ├─ 解析 → Yahoo-friendly 過濾
-  ├─ 切分 4 shards (預設)
-  ├─ 輸出 shard_01.csv ~ shard_04.csv
-  └─ 輸出 prepare.json (含 matrix)
-
-update-shards (4 parallel jobs, max-parallel=4)
-  ├─ 下載 prepare workspace
-  ├─ 讀取對應 shard CSV
-  ├─ 下載 2mo daily bars (curl_cffi 優先)
-  ├─ 計算 30日平均成交額
-  ├─ 分類：
-      - 下載失敗/可能退市
-      - 30日均額 < $15M (小市值)
-  └─ 輸出 shard_NN.json + shard_NN.csv
-
-aggregate (1 job)
-  ├─ 合併所有 shard 結果
-  ├─ 生成月更排除列表
-  ├─ 更新 data/universe/
-  └─ Commit & Push 回倉庫
-```
-
-### 月更排除規則
-
-| 類別 | 條件 | 來源 |
-|------|------|------|
-| 小市值 | 30日平均成交額 < $15M | 即時計算 |
-| 下載失敗 | Yahoo 無數據 / 可能退市 / 未上市 | 下載失敗集合 |
-| 手動排除 | config/exclude_symbols.txt | 人工維護 |
-
----
-
-## 目錄結構
-
-```
-.
-├── us_pattern_scan.py          # 主掃描邏輯 (76 KB)
-├── scan_cli.py                 # CLI 入口 (替代 run_scan.sh 內聯 Python)
-├── yahoo_fetcher.py            # Yahoo 下載器 (curl_cffi + yfinance 回退)
-├── scripts/
-│   ├── run_scan.sh             # 執行入口 (bash)
-│   ├── update_symbol_universe.py  # 月更主腳本 (prepare/shard/aggregate)
-│   ├── scan_cli.py             # 掃描 CLI (供 run_scan.sh 調用)
-│   ├── render_discord.py       # Discord Embed 渲染
-│   ├── post_to_discord.py      # Discord 發送
-│   └── run_scan.sh             # 執行腳本
-├── .github/workflows/
-│   ├── pullback-scan.yml       # 掃描任務 (手動觸發 + 可選排程)
-│   └── update-universe-cache.yml  # 月更任務 (每月 1 號 02:00 UTC)
-├── config/
-│   ├── exclude_symbols.txt     # 手動排除黑名單
-│   └── config.yaml             # 所有閾值配置
-├── config.py                   # 配置加載器 (環境變量覆蓋)
-├── cache_utils.py              # Parquet Bars 緩存
-├── bar_cache.py                # 下載緩存整合
-├── logging_utils.py            # 標準 logging
-├── render_utils.py             # 表格/簡報渲染工具
-├── scan_cli.py                 # 掃描 CLI 參數解析
-├── data/universe/
-│   ├── nasdaqlisted.txt
-│   ├── otherlisted.txt
-│   ├── us_symbols.csv
-│   ├── monthly_excluded_symbols.json/csv/txt
-│   ├── manifest.json
-│   └── yahoo_bad_symbols.txt
-├── requirements.txt
-└── README.md
-```
-
----
-
-## 配置參數 (config.yaml)
-
-### 流動性閾值
-```yaml
-liquidity:
-  min_avg_dollar_volume_20d: 20000000   # $20M 最小入選
-  band_high: 50000000                    # $50M 高流動性分組
-  smallcap_avg_dollar_volume_30d: 15000000  # $15M 小市值閾值
-```
-
-### 形態參數
-```yaml
-scan:
-  swing_window: 3                        # 局部高低點窗口
-  short_trend_lookback: 30               # 短期趨勢看回天數
-  long_trend_lookback: 90                # 長期趨勢看回天數
-  long_term_trend_bonus: 5               # 長期趨勢同步加分
-  min_double_structure_gap: 20           # 雙底/雙頂最小間隔天數
-  double_structure_wide_gap_bonus: 5     # 寬間隔 (≥60天) 加分
-  double_structure_wide_gap_threshold: 60
-  direction_filter_days: 5               # 方向過濾看回天數
-  direction_filter_min_pct: 1.0          # 方向過濾最小漲跌幅
-  week52_lookback: 252                   # 52週高低看回
-  week52_proximity_bonus_max: 15         # 52週接近度最大加分
-  pullback_20d_filter: true              # 啟用 20日均線過濾
-  max_confirmation_age_days: 90          # 確認日最大天數
-```
-
-### 下載參數
-```yaml
-download:
-  batch_size_stage1: 120                 # Stage 1 批次大小
-  batch_size_stage2: 100                 # Stage 2 批次大小
-  timeout: 45                            # 請求超時秒數
-  retry_count: 3                         # 重試次數
-  retry_delay_base: 0.8                  # 退避基礎延遲
-```
-
-### Universe 參數
-```yaml
-universe:
-  smallcap_avg_dollar_volume_30d: 15000000
-  cache_fresh_days: 25                   # 緩存新鮮天數
-  shard_count: 18                        # 預分片數
-```
-
----
-
-## 環境變量覆蓋
-
-所有 `config.yaml` 參數均可通過環境變量覆蓋，格式：`HERMES_<SECTION>_<KEY>`
-
-```bash
-# 例子
-HERMES_LIQUIDITY_MIN_AVG_DOLLAR_VOL_20D=30000000
-HERMES_SCAN_SWING_WINDOW=5
-HERMES_DOWNLOAD_BATCH_SIZE_STAGE1=100
-```
-
----
-
-## 本地運行
-
-### 依賴安裝
 ```bash
 python -m pip install -r requirements.txt
+HERMES_SCAN_MAX_SYMBOLS=200 bash scripts/run_scan.sh
 ```
 
-### 快速測試 (200 支股票)
+全量运行：
+
+```bash
+python -m pip install -r requirements.txt
+bash scripts/run_scan.sh
+```
+
+可調參數（multi-worker 架構）：
+
+```bash
+HERMES_SCAN_UNIVERSE_SHARDS=18
+HERMES_SCAN_WORKER_CONCURRENCY=6
+HERMES_SCAN_STAGE2_SHARDS_PER_WORKER=1
+HERMES_SCAN_STAGE1_PERIOD=1mo
+HERMES_SCAN_STAGE1_BATCH=120
+HERMES_SCAN_STAGE2_BATCH=100
+HERMES_SCAN_WORKER_STAGGER=0.5
+```
+
+## 股票代号缓存设计
+
+现在扫描任务会**优先读取本地缓存**：
+
+- `data/universe/nasdaqlisted.txt`
+- `data/universe/otherlisted.txt`
+- `data/universe/manifest.json`
+- `data/universe/yahoo_bad_symbols.txt`
+
+只有当本地缓存不存在时，才会临时回退到在线抓取 Nasdaq Trader。
+
+这样做的好处：
+- 平时扫描少一次联网抓股票代号
+- 运行更稳定
+- 更容易排查问题
+- 股票池来源固定，结果更可复现
+
+### Yahoo-friendly universe filter（更嚴格）
+
+主掃描在載入本地股票池後，會先套用：
+
+- `config/exclude_symbols.txt` 手動黑名單
+- `data/universe/monthly_excluded_symbols.json` 月更低流動性 / 疑似退市未上市排除池
+
+然後再做一層更嚴格的 Yahoo-friendly 過濾，進一步排除：
+
+- warrant / warrants
+- right / rights
+- unit / units
+- preferred / preferred stock / trust preferred
+- depositary / depository
+- ETN / NextShares / notes / bonds
+- `-V`、`-WI`、`-WS`、`-WD`、`-U`、`-R`、`-RT`、`-P` 等 Yahoo 常見高風險特殊後綴
+- 少量已知常 timeout / 無數據 / quote not found 的 bad symbols（由 `data/universe/yahoo_bad_symbols.txt` 維護）
+
+另外，現在 workflow / 本地腳本已改成：
+- **universe 先切 shard**
+- **多 worker 分散 stage1**
+- **每個 worker 自己深掃**
+- **worker 之間有 stagger + 下載前 sleep/retry/backoff**
+
+## 本地先更新一次股票池與月更排除池
+
+```bash
+python scripts/update_symbol_universe.py
+```
+
+如果你想本地模擬 GitHub Actions 的 matrix 月更流程，可分三段跑：
+
+```bash
+python scripts/update_symbol_universe.py --mode prepare --workspace-dir .tmp/universe_update --shard-count 4
+python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 1
+python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 2
+python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 3
+python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 4
+python scripts/update_symbol_universe.py --mode aggregate --workspace-dir .tmp/universe_update
+```
+
+如果只想檢查 workflow / commit 流程，不想在 25 天內重複重跑完整月更，可用：
+
+```bash
+python scripts/update_symbol_universe.py --skip-if-fresh-days 25
+```
+
+如需無視 freshness guard 強制全量重建：
+
+```bash
+python scripts/update_symbol_universe.py --force-refresh
+```
+
+跑完後會生成：
+- `data/universe/nasdaqlisted.txt`
+- `data/universe/otherlisted.txt`
+- `data/universe/us_symbols.csv`
+- `data/universe/manifest.json`
+- `data/universe/monthly_excluded_symbols.json`
+- `data/universe/monthly_excluded_symbols.csv`
+- `data/universe/monthly_excluded_symbols.txt`
+- `config/exclude_symbols.txt`（若原本不存在會自動建立）
+
+月更排除規則：
+- 過去 **30 天平均成交額 < 1500 萬美元**
+- Yahoo 對不到 / 可能已退市 / 未上市的股票
+
+`data/universe/yahoo_bad_symbols.txt` 不會被月更腳本覆蓋，適合你手動維護 Yahoo 常出問題的 symbol blacklist。
+
+然后再跑扫描：
+
 ```bash
 HERMES_SCAN_MAX_SYMBOLS=200 bash scripts/run_scan.sh
 ```
 
-### 全量運行
-```bash
-bash scripts/run_scan.sh
+## GitHub Actions 用法
+
+### 手动试跑
+1. 把整个仓库 push 到 GitHub
+2. 打开仓库 `Actions`
+3. 选择 `pullback-scan`
+4. 点击 `Run workflow`
+5. 这版默认就是**全量扫描**（`max_symbols` 留空）
+6. 如果只想先做 smoke test，可手动填 `max_symbols=200`
+7. 如需調快/調穩，可覆蓋 `universe_shards`、`worker_concurrency`、`stage1_batch`、`stage2_batch`
+
+### 定时执行
+扫描工作流当前是：
+
+```yaml
+schedule:
+  - cron: '0 9 * * 1-5'
 ```
 
-### 參數覆蓋
-```bash
-HERMES_SCAN_UNIVERSE_SHARDS=18 HERMES_SCAN_WORKER_CONCURRENCY=6 HERMES_SCAN_STAGE1_BATCH=120 HERMES_SCAN_STAGE2_BATCH=100 bash scripts/run_scan.sh
+这是 **UTC 09:00，周一到周五**。
+如要换时间，改这个 cron 即可。
+
+股票代号缓存更新工作流当前是：
+
+```yaml
+schedule:
+  - cron: '0 2 1 * *'
 ```
 
-### 月更手動觸發
-```bash
-# 完整流程
-python scripts/update_symbol_universe.py --mode prepare --shard-count 4
-python scripts/update_symbol_universe.py --mode shard --shard-index 1
-python scripts/update_symbol_universe.py --mode shard --shard-index 2
-python scripts/update_symbol_universe.py --mode shard --shard-index 3
-python scripts/update_symbol_universe.py --mode shard --shard-index 4
-python scripts/update_symbol_universe.py --mode aggregate
+這是 **每月 1 號 UTC 02:00** 自動更新一次 `data/universe/` 與 `config/exclude_symbols.txt`，並自動 commit 回倉庫。workflow 現在拆成 **prepare → matrix shards → aggregate**：先建立 universe / shard 清單，再並行下載每個 shard 的 Yahoo 資料，最後聚合結果並推回倉庫。push 前仍會先 `fetch + rebase` 再推送，以降低 remote branch 先更新造成的 non-fast-forward 失敗。
 
-# 或單行 (自動分片)
-python scripts/update_symbol_universe.py
+另外，這個 updater workflow 現在會在 cache/manifest 仍屬新鮮（25 天內）時自動跳過完整重建；如果你是手動點 `Run workflow` 想強制全量重跑，可把 `force_refresh` 勾成 `true`。你也可以在手動執行時調整 `shard_count` 與 `max_parallel`；一般建議從 `4 / 4` 或 `6 / 3` 開始。
 
-# 跳過 25 天內已更新
-python scripts/update_symbol_universe.py --skip-if-fresh-days 25
+## 产物
 
-# 強制全量重建
-python scripts/update_symbol_universe.py --force-refresh
-```
+每次运行会产出：
+- `pullback_scan.md`
+- `pullback_scan.json`
+- `pullback_scan.stderr.log`
+- `liquid_symbols.json`
+- `artifacts/` worker 目录与分片 JSON
 
----
+GitHub Actions 会把整个 `output/` 上传成 artifact，供你下载；但 `output/` 不会被 git commit 到仓库。
 
-## GitHub Actions 部署
+## 推荐上线顺序
 
-### 掃描任務
-1. Push 到 GitHub
-2. Actions → `pullback-scan` → Run workflow
-3. 可選參數：`max_symbols` (smoke test 填 200)
+1. 先本地/Actions 手动跑 `max_symbols=200`
+2. 看 artifact 里的 `stderr.log` 是否有正常进度
+3. 看 `pullback_scan.md` 格式是否符合你要的简报样式
+4. 看 `liquid_symbols.json` / `pullback_scan.json` 裡的 `run_config` 是否符合預期
+5. 确认 `data/universe/` 已存在缓存文件
+6. 再切换到全量运行
 
-### 月更任務
-- 自動：每月 1 號 02:00 UTC
-- 手動：Actions → `update-universe-cache` → Run workflow
-- 參數：`force_refresh=true` 強制重建
+## 自动发送到 Discord 群组频道
+你已经在 GitHub Actions secret 里配置了：
 
-### Secrets 需設置
-| Secret | 用途 |
-|--------|------|
-| `DISCORD_WEBHOOK_URL` | Discord 簡報推送 |
+- `DISCORD_WEBHOOK_URL`
 
----
+本模板已內置發送步驟：workflow 跑完後，會自動把最新的 `pullback_scan.md` 發到該 webhook 對應的 Discord 頻道。並且 workflow 最後一步已改成以 `env.DISCORD_WEBHOOK_URL` 做檢查，避免直接在 step `if:` 內判斷 `secrets.*`。
 
-## 關鍵文件說明
+注意：
+- Discord webhook 只能发到**频道**，不能发私信。
+- 单条消息有 2000 字符限制；当前这版简报通常不会超。模板里仍做了截断保护。
+- 如果 workflow 成功但 Discord 没收到，先检查 webhook 是否仍有效、secret 名称是否完全一致。
 
-| 文件 | 職責 |
-|------|------|
-| `us_pattern_scan.py` | 核心掃描邏輯：解析、下載、形態識別、評分、聚合 |
-| `scan_cli.py` | CLI 參數解析、Stage 1/2 協調、輸出格式控制 |
-| `yahoo_fetcher.py` | 多後端下載：curl_cffi (Chrome 120) → yfinance 回退 |
-| `scripts/update_symbol_universe.py` | 月更三階段：prepare → shard → aggregate |
-| `bar_cache.py` / `cache_utils.py` | Parquet 格式 Bars 緩存 (TTL 30 天) |
-| `render_utils.py` / `scripts/render_discord.py` | 表格對齊、Markdown/Embed 渲染 |
-| `scripts/post_to_discord.py` | Discord Webhook 發送 (Embed + Thread) |
-
----
-
-## 版本歷史
-
-| 版本 | 關鍵變更 |
-|------|----------|
-| v3.27 | yahoo_fetcher 併發優化 (4 workers, 移除冗餘 sleep) |
-| v3.26 | 恢復 curl_cffi 下載器，修復 Yahoo 封禁導致全量失敗 |
-| v3.25 | 簡化月更邏輯 (硬編碼 Symbol, 移除緩存) |
-| v3.24 | 列名標準化 + utf-8-sig 處理 BOM |
-| v3.23 | 強制列名檢測，修復 KeyError |
-| v3.22 | 動態列名支持，移除硬編碼 |
-| v3.20 | 修復 write_shard_frames UnboundLocalError |
-| v3.15 | 月更 KeyError: 'Symbol' 系列修復 |
-| v3.14 | 修復 GitHub Actions merge-multiple 覆蓋問題 |
-| v3.13 | Aggregate 遞歸 glob 讀取 shard 結果 |
-| v3.11 | Matrix 模式 Discord 報告顯示真實掃描範圍 |
-| v3.10 | scan_cli.py 導入路徑修復 |
-| v3.0+ | Matrix 並行架構重構 |
-
----
-
-## 常見問題排查
-
-### 掃描耗時過長
-- 檢查 `yahoo_fetcher.py` 併發設置 (`max_workers=4`)
-- 減少 `stage1_batch` / `stage2_batch`
-- 確認 curl_cffi 正常導入 (`USE_CURL_CFFI=True`)
-
-### 月更全部下載失敗
-- 確認 `curl_cffi` 已安裝且版本 ≥ 0.15
-- 檢查 GitHub Actions 網絡是否通 (需 Cloudflare WARP)
-- 查看 stderr log 中的 `DOWNLOAD_RATE_LIMIT` / `DOWNLOAD_ERROR`
-
-### KeyError: 'Symbol'
-- 確保 CSV 讀取使用 `encoding='utf-8-sig'` 處理 BOM
-- 所有列名操作統一用硬編碼 `'Symbol'`
-
-### Discord 推送失敗
-- 檢查 `DISCORD_WEBHOOK_URL` 是否正確
-- 確認 Webhook 權限包含 `Send Messages` + `Manage Threads`
-- 查看 `post_to_discord.py` 的錯誤響應體日誌
-
----
-
-## 授權
-
-MIT License — 內部量化研究使用，非投資建議。
+## 如果你还想扩展
+如果你要，我可以下一步继续帮你补：
+1. **GitHub 自动推送到 Telegram**
+2. **每次运行后自动 commit 最新 Markdown 到仓库**
+3. **Discord 发送失败时自动重试 / @某个角色**
