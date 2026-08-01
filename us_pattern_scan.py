@@ -69,32 +69,14 @@ def _hard_timeout_handler(signum, frame):
 
 
 def run_with_hard_timeout(seconds, fn):
-    # Windows doesn't have SIGALRM, use threading-based timeout instead
-    import threading
-    import sys
-    
-    result = [None]
-    exception = [None]
-    
-    def target():
-        try:
-            result[0] = fn()
-        except Exception as e:
-            exception[0] = e
-    
-    thread = threading.Thread(target=target)
-    thread.daemon = True
-    thread.start()
-    thread.join(timeout=seconds)
-    
-    if thread.is_alive():
-        # Timeout occurred - we can't actually stop the thread, but we can raise an error
-        raise TimeoutError(f'hard timeout after {seconds}s waiting for yfinance download')
-    
-    if exception[0]:
-        raise exception[0]
-    
-    return result[0]
+    previous = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _hard_timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        return fn()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def fetch_text(url: str) -> str:
