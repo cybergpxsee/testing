@@ -15,45 +15,37 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
-# Import config and utilities
+# 导入配置
 from config import (
-    CONFIG, SWING_WINDOW, SHORT_TREND_LOOKBACK, LONG_TREND_LOOKBACK,
+    SWING_WINDOW, SHORT_TREND_LOOKBACK, LONG_TREND_LOOKBACK,
     LONG_TERM_TREND_BONUS, MIN_DOUBLE_STRUCTURE_GAP,
     DOUBLE_STRUCTURE_WIDE_GAP_BONUS, DOUBLE_STRUCTURE_WIDE_GAP_THRESHOLD,
     DIRECTION_FILTER_DAYS, DIRECTION_FILTER_MIN_PCT,
     WEEK52_PROXIMITY_BONUS_MAX, WEEK52_LOOKBACK,
     PULLBACK_20D_FILTER, MIN_CLOSE_POSITION_PCT,
-    PULLBACK_MAX_CONFIRM_AGE_DAYS
+    PULLBACK_MAX_CONFIRM_AGE_DAYS,
+    MIN_AVG_DOLLAR_VOLUME_20D, LIQUIDITY_BAND_HIGH
 )
-from logging_utils import get_logger, log_info, log_warning, log_error, log_debug
-from cache_utils import get_cache, BarCache
-
-# Import yahoo_fetcher for robust downloading
+from logging_utils import log_info, log_warning, log_error, log_debug
+from cache_utils import get_cache
 from yahoo_fetcher import download_bars as yf_download_bars
-from cache_utils import get_cache, BarCache
 
-# Forward declarations for functions used by aggregate_shard_results (to avoid circular imports)
-# These are defined later in this module
-# clone_row_for_liquidity_band, render_markdown_report
-
-# Compatibility function for scan_cli.py
+# ========== 兼容旧脚本的 append_log ==========
 def append_log(log_path: str, message: str):
-    """Legacy append_log function - uses standard logging instead."""
-    import logging
-    logger = logging.getLogger('pullback_scan')
-    logger.info(message)
+    """Legacy append_log function for compatibility with run_scan.sh."""
+    ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    with open(log_path, 'a', encoding='utf-8') as f:
+        f.write(f"[{ts}] {message}\n")
 
+# ========== 全局常量 ==========
 UA = "Mozilla/5.0 (X11; Linux x86_64) Hermes-Agent/1.0"
-
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 
-
+# ========== 辅助函数（解析、过滤等）==========
 def _hard_timeout_handler(signum, frame):
     raise TimeoutError('hard timeout waiting for yfinance download')
-
 
 def run_with_hard_timeout(seconds, fn):
     previous = signal.getsignal(signal.SIGALRM)
@@ -65,12 +57,10 @@ def run_with_hard_timeout(seconds, fn):
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
 
-
 def fetch_text(url: str) -> str:
     req = Request(url, headers={"User-Agent": UA})
     with urlopen(req, timeout=60) as resp:
         return resp.read().decode("utf-8", errors="replace")
-
 
 def parse_nasdaq_listed(text: str) -> pd.DataFrame:
     df = pd.read_csv(StringIO(text), sep="|")
@@ -82,7 +72,6 @@ def parse_nasdaq_listed(text: str) -> pd.DataFrame:
     df["test_issue"] = df["Test Issue"].fillna("N").astype(str).str.upper().eq("Y")
     return df[["Symbol", "name", "etf", "test_issue", "source"]]
 
-
 def parse_other_listed(text: str) -> pd.DataFrame:
     df = pd.read_csv(StringIO(text), sep="|")
     df = df[df["ACT Symbol"].notna()]
@@ -93,7 +82,6 @@ def parse_other_listed(text: str) -> pd.DataFrame:
     df["test_issue"] = df["Test Issue"].fillna("N").astype(str).str.upper().eq("Y")
     return df.rename(columns={"ACT Symbol": "Symbol"})[["Symbol", "name", "etf", "test_issue", "source"]]
 
-
 BAD_PATTERNS = [
     " warrant", " warrants", " right", " rights", " unit", " units", " preferred", " depositary", " depository",
     " adr", " ads", " note", " notes", " bond", " etn", " nextshares", " when issued", " due ", " rate ",
@@ -103,19 +91,8 @@ GOOD_STOCK_PATTERNS = [
     " common stock", " common shares", " ordinary shares", " common share", " ordinary share", " class a common", " class b common"
 ]
 DEFAULT_BAD_SYMBOLS_FILE = Path(__file__).resolve().parent / 'data' / 'universe' / 'yahoo_bad_symbols.txt'
-BAD_SYMBOL_SUFFIXES = (
-    '-V', '.V',
-    '-WI', '.WI',
-    '-WD', '.WD',
-    '-WS', '.WS',
-    '-W', '.W',
-    '-U', '.U',
-    '-R', '.R',
-    '-RT', '.RT',
-    '-P', '.P',
-)
+BAD_SYMBOL_SUFFIXES = ('-V','.V','-WI','.WI','-WD','.WD','-WS','.WS','-W','.W','-U','.U','-R','.R','-RT','.RT','-P','.P',)
 BAD_SYMBOL_SUBSTRINGS = ('^', '/', '=')
-
 
 def load_known_bad_symbols(path: Path | None = None) -> set[str]:
     target = Path(path) if path else DEFAULT_BAD_SYMBOLS_FILE
@@ -131,9 +108,7 @@ def load_known_bad_symbols(path: Path | None = None) -> set[str]:
         out.add(upper.replace('.', '-'))
     return out
 
-
 KNOWN_BAD_SYMBOLS = load_known_bad_symbols()
-
 
 def is_probably_yahoo_friendly_symbol(symbol: str) -> bool:
     sym = str(symbol or '').upper().strip()
@@ -151,7 +126,6 @@ def is_probably_yahoo_friendly_symbol(symbol: str) -> bool:
     if any(yahoo_sym.endswith(suffix.replace('.', '-')) for suffix in BAD_SYMBOL_SUFFIXES):
         return False
     return True
-
 
 def is_regular_security(symbol: str, name: str, is_etf: bool, test_issue: bool) -> bool:
     if not symbol or test_issue:
@@ -174,15 +148,12 @@ def is_regular_security(symbol: str, name: str, is_etf: bool, test_issue: bool) 
         return True
     return False
 
-
 def yahoo_symbol(sym: str) -> str:
     return sym.replace('.', '-')
-
 
 def chunked(seq, n):
     for i in range(0, len(seq), n):
         yield seq[i:i+n]
-
 
 def split_into_shards(seq, shard_count):
     if shard_count <= 1 or len(seq) <= 1:
@@ -200,50 +171,37 @@ def split_into_shards(seq, shard_count):
         start = end
     return out
 
-
-
-
-
-def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD', interval='1d'):
-    from cache_utils import get_cache
+# ========== 下载函数（支持环境变量选择后端）==========
+def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
     cache = get_cache()
-    
     cached_frames = {}
     to_download = []
-    cache_hits = 0
-    cache_misses = 0
     for sym in symbols:
         cached = cache.get(sym, period)
         if cached is not None:
             cached_frames[sym] = cached
-            cache_hits += 1
         else:
             to_download.append(sym)
-            cache_misses += 1
-    if cache_hits > 0:
-        log_info(f"Cache: hits={cache_hits} misses={cache_misses} for {len(symbols)} symbols period={period}")
-    
     if to_download:
-        # 使用 yahoo_fetcher 的稳健下载
+        # 从环境变量读取首选后端，默认 curl_cffi（抗限流更好）
+        prefer = os.environ.get('HERMES_SCAN_PREFER_BACKEND', 'curl_cffi')
         new_frames, misses = yf_download_bars(
             symbols=to_download,
             period=period,
             stderr_path=stderr_path,
             batch=batch,
             phase=phase,
-            interval=interval,
-            prefer_backend='curl_cffi'
+            interval='1d',
+            prefer_backend=prefer
         )
-        # 缓存新下载的数据
         for sym, df in new_frames.items():
             cache.set(sym, period, df)
         cached_frames.update(new_frames)
     else:
         misses = set()
-    
     return cached_frames, misses
 
-
+# ========== 核心分析函数（与之前一致，包括所有改进）==========
 def local_extrema(df: pd.DataFrame, kind: str, lookback=90, window=SWING_WINDOW):
     sdf = df.tail(lookback).reset_index(drop=True)
     arr = sdf['Low'].to_numpy() if kind == 'low' else sdf['High'].to_numpy()
@@ -260,11 +218,9 @@ def local_extrema(df: pd.DataFrame, kind: str, lookback=90, window=SWING_WINDOW)
                     idxs.append(i)
     return sdf, idxs[-10:]
 
-
 def avg_body(df):
     s = (df['Close'] - df['Open']).abs()
     return float(s.mean()) if len(s) else 0.0
-
 
 def avg_tr(df):
     prev_close = df['Close'].shift(1)
@@ -275,7 +231,6 @@ def avg_tr(df):
     ], axis=1).max(axis=1)
     return float(tr.mean()) if len(tr.dropna()) else 0.0
 
-
 def score_confirm_day(df, idx, bullish=True):
     if idx <= 0 or idx >= len(df):
         return 0.0
@@ -285,19 +240,15 @@ def score_confirm_day(df, idx, bullish=True):
     avg20_body = avg_body(trailing)
     avg20_vol = float(trailing['Volume'].mean()) if len(trailing) else 0.0
     score = 0.0
-    # 阳/阴实体加3分
     if bullish and row['Close'] > row['Open']:
         score += 3
     if (not bullish) and row['Close'] < row['Open']:
         score += 3
-    # 实体 > 20日均实体 加3分
     if avg20_body > 0 and body > avg20_body:
         score += 3
-    # 成交量 > 20日均量 加3分
     if avg20_vol > 0 and row['Volume'] > avg20_vol:
         score += 3
     return score
-
 
 def reference_close_n_trading_days_ago(df, idx, days=DIRECTION_FILTER_DAYS):
     ref_idx = idx - days
@@ -305,21 +256,13 @@ def reference_close_n_trading_days_ago(df, idx, days=DIRECTION_FILTER_DAYS):
         return None
     return float(df.iloc[ref_idx]['Close'])
 
-
+# 方向过滤改为加分（不硬过滤）
 def passes_direction_filter_on_idx(df, idx, bullish=True, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT):
-    """
-    Direction filter as bonus only (not hard filter).
-    For bullish: close in upper 40% gives bonus, relative 5-day gain gives bonus
-    For bearish: close in lower 40% gives bonus, relative 5-day drop gives bonus
-    Returns: (always True, total_bonus)
-    """
     ref_close = reference_close_n_trading_days_ago(df, idx, days=days)
     if ref_close is None:
         return True, 0
     current_close = float(df.iloc[idx]['Close'])
-    
     bonus = 0
-    # Close position as bonus
     high = float(df.iloc[idx]['High'])
     low = float(df.iloc[idx]['Low'])
     if high > low:
@@ -328,17 +271,12 @@ def passes_direction_filter_on_idx(df, idx, bullish=True, days=DIRECTION_FILTER_
             bonus += 4
         elif (not bullish) and close_position <= (1 - MIN_CLOSE_POSITION_PCT):
             bonus += 4
-    
-    # Direction momentum as bonus (not hard filter)
     pct = (current_close / ref_close - 1.0) * 100.0
     if bullish and pct >= min_pct:
-        bonus += 4  # 方向向上加分
+        bonus += 4
     elif (not bullish) and pct <= -min_pct:
-        bonus += 4  # 方向向下加分
-    
-    # Always pass, return bonus
+        bonus += 4
     return True, bonus
-
 
 def trailing_avg_dollar_volume(df, idx, days=5):
     if idx < 0 or idx >= len(df):
@@ -352,16 +290,14 @@ def trailing_avg_dollar_volume(df, idx, days=5):
         return None
     return float(dv.mean())
 
-
 def liquidity_band_from_avg_dollar_volume(avg_dollar_volume):
     if avg_dollar_volume is None or not np.isfinite(avg_dollar_volume):
         return None
-    if avg_dollar_volume >= 50_000_000:
+    if avg_dollar_volume >= LIQUIDITY_BAND_HIGH:
         return '50m_plus'
-    if avg_dollar_volume >= 20_000_000:
+    if avg_dollar_volume >= MIN_AVG_DOLLAR_VOLUME_20D:
         return '20m_to_50m'
     return None
-
 
 def filter_recent_windows_by_direction(df, windows, bullish=True, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT):
     filtered = []
@@ -391,11 +327,9 @@ def filter_recent_windows_by_direction(df, windows, bullish=True, days=DIRECTION
             filtered.append(new_w)
     return filtered
 
-
 def date_to_index(df, date_str):
     matches = df.index[df['Date'].dt.strftime('%Y-%m-%d') == str(date_str)].tolist()
     return matches[0] if matches else None
-
 
 def find_platform_zone(series, around_idx, direction='long'):
     left = max(0, around_idx - 10)
@@ -405,14 +339,7 @@ def find_platform_zone(series, around_idx, direction='long'):
         return None
     return float(seg.quantile(0.35)), float(seg.quantile(0.65))
 
-
 def find_chip_dense_zone(df, around_idx, lookback=90, bins=24):
-    """
-    Find chip dense zone with half-life time weighting and width consideration.
-    Returns: (low, high, mid, time_weight, width_score) 
-    time_weight: half-life decay (20-day half-life)
-    width_score: narrower zone = higher score (more concentrated chips)
-    """
     left = max(0, around_idx - lookback + 1)
     seg = df.iloc[left:around_idx+1].dropna(subset=['High', 'Low', 'Close', 'Volume'])
     if len(seg) < 8:
@@ -447,14 +374,10 @@ def find_chip_dense_zone(df, around_idx, lookback=90, bins=24):
         return None
     peak_idx = int(np.argmax(weights))
     peak_mid = float((edges[peak_idx] + edges[peak_idx + 1]) / 2.0)
-    
-    # Calculate zone width and width score (narrower = more concentrated = higher score)
     bin_width = (price_high - price_low) / bins
-    zone_width = bin_width * 1.5  # effective zone width
-    # Width score: narrower zone = more concentrated chips = higher score
-    # Normalize: ideal narrow width ~ 0.5% of price, max score at 0.2%, zero at 3%
-    ideal_width = peak_mid * 0.005  # 0.5% of price
-    max_width = peak_mid * 0.03   # 3% of price
+    zone_width = bin_width * 1.5
+    ideal_width = peak_mid * 0.005
+    max_width = peak_mid * 0.03
     if zone_width <= ideal_width:
         width_score = 1.0
     elif zone_width >= max_width:
@@ -462,14 +385,11 @@ def find_chip_dense_zone(df, around_idx, lookback=90, bins=24):
     else:
         width_score = 1.0 - (zone_width - ideal_width) / (max_width - ideal_width)
     width_score = max(0.0, min(1.0, width_score))
-    
-    # Calculate time weight with half-life decay (20-day half-life)
+
     peak_bin_low = float(edges[peak_idx])
     peak_bin_high = float(edges[peak_idx + 1])
-    
-    peak_vol_contrib = 0.0
     peak_date = df.iloc[around_idx]['Date']
-    
+    peak_vol_contrib = 0.0
     for _, row in seg.iterrows():
         lo = float(row['Low'])
         hi = float(row['High'])
@@ -483,16 +403,13 @@ def find_chip_dense_zone(df, around_idx, lookback=90, bins=24):
             if contrib > peak_vol_contrib:
                 peak_vol_contrib = contrib
                 peak_date = row['Date']
-    
-    # Half-life decay: every 20 days weight halves
     days_ago = (df.iloc[around_idx]['Date'] - peak_date).days if isinstance(peak_date, pd.Timestamp) else 0
     half_life = 20.0
-    time_weight = 0.5 ** (days_ago / half_life)  # 半衰期衰减
-    time_weight = max(0.1, time_weight)  # 最小保底 0.1
-    
+    time_weight = 0.5 ** (days_ago / half_life)
+    time_weight = max(0.1, time_weight)
     return peak_mid - zone_width, peak_mid + zone_width, peak_mid, time_weight, width_score
 
-
+# ========== 趋势线相关函数（保持不变）==========
 def _recent_desc_break_from_anchors(df, confirm_idx, anchors, min_gap=3, overshoot_tol=0.0075):
     if len(anchors) < 2:
         return None
@@ -526,7 +443,6 @@ def _recent_desc_break_from_anchors(df, confirm_idx, anchors, min_gap=3, oversho
                 'recent_touch': recent_touch,
             }
     return None
-
 
 def _recent_asc_break_from_anchors(df, confirm_idx, anchors, min_gap=3, overshoot_tol=0.0075):
     if len(anchors) < 2:
@@ -562,7 +478,6 @@ def _recent_asc_break_from_anchors(df, confirm_idx, anchors, min_gap=3, overshoo
             }
     return None
 
-
 def _fallback_desc_anchors(seg, start, max_points=12):
     highs = seg['High'].astype(float)
     ranked = sorted(range(len(seg) - 1), key=lambda i: (float(highs.iloc[i]), -i), reverse=True)
@@ -578,7 +493,6 @@ def _fallback_desc_anchors(seg, start, max_points=12):
     out.sort(key=lambda x: x[0])
     return out
 
-
 def _fallback_asc_anchors(seg, start, max_points=12):
     lows = seg['Low'].astype(float)
     ranked = sorted(range(len(seg) - 1), key=lambda i: (float(lows.iloc[i]), i))
@@ -593,27 +507,6 @@ def _fallback_asc_anchors(seg, start, max_points=12):
             break
     out.sort(key=lambda x: x[0])
     return out
-
-
-def trendline_break_regression(df, idx, lookback, direction='desc'):
-    """Linear regression trendline break check."""
-    start = max(0, idx - lookback)
-    seg = df.iloc[start:idx+1]
-    if len(seg) < 5:
-        return None
-    y = seg['High'].values if direction == 'desc' else seg['Low'].values
-    x = np.arange(len(y))
-    try:
-        slope, intercept = np.polyfit(x, y, 1)
-        line_val = intercept + slope * (idx - start)
-        close = float(df.iloc[idx]['Close'])
-        if direction == 'desc':
-            return close > line_val
-        else:
-            return close < line_val
-    except Exception:
-        return None
-
 
 def find_recent_desc_trendline_break(df, confirm_idx, lookback=SHORT_TREND_LOOKBACK, window=SWING_WINDOW):
     start = max(0, confirm_idx - lookback)
@@ -631,7 +524,6 @@ def find_recent_desc_trendline_break(df, confirm_idx, lookback=SHORT_TREND_LOOKB
         return result
     return None
 
-
 def find_recent_asc_trendline_break(df, confirm_idx, lookback=SHORT_TREND_LOOKBACK, window=SWING_WINDOW):
     start = max(0, confirm_idx - lookback)
     seg = df.iloc[start:confirm_idx+1].reset_index(drop=True)
@@ -648,7 +540,6 @@ def find_recent_asc_trendline_break(df, confirm_idx, lookback=SHORT_TREND_LOOKBA
         return result
     return None
 
-
 def qualifies_reclaim_after_fib_break_long(df, fib618, idx, max_days=5):
     close = float(df.iloc[idx]['Close'])
     low = float(df.iloc[idx]['Low'])
@@ -663,7 +554,6 @@ def qualifies_reclaim_after_fib_break_long(df, fib618, idx, max_days=5):
         if bullish_candle or gap_reclaim:
             return True, True
     return False, False
-
 
 def qualifies_reclaim_after_fib_break_short(df, fib618, idx, max_days=5):
     close = float(df.iloc[idx]['Close'])
@@ -680,19 +570,10 @@ def qualifies_reclaim_after_fib_break_short(df, fib618, idx, max_days=5):
             return True, True
     return False, False
 
-
-
 def calc_pullback_depth_bonus(df, peak_idx, pullback_idx, bullish=True):
-    """
-    计算回调深度加分
-    做多: 回调幅度(从波峰到回调低点) / 前段涨幅
-    做空: 回抽幅度(从波谷到回抽高点) / 前段跌幅
-    38.2%~61.8%区间加分，过深(>80%)或过浅(<20%)减分
-    """
     if bullish:
         peak_price = float(df.iloc[peak_idx]['High'])
         pullback_price = float(df.iloc[pullback_idx]['Low'])
-        # Find the start of the upwave (local low before peak)
         upwave_start_idx = peak_idx
         for i in range(peak_idx - 1, max(-1, peak_idx - 60), -1):
             if float(df.iloc[i]['Low']) < float(df.iloc[i+1]['Low']):
@@ -703,11 +584,10 @@ def calc_pullback_depth_bonus(df, peak_idx, pullback_idx, bullish=True):
         upwave_height = peak_price - upwave_low
         if upwave_height <= 0:
             return 0
-        retrace = (peak_price - float(df.iloc[pullback_idx]['Low'])) / upwave_height
+        retrace = (peak_price - pullback_price) / upwave_height
     else:
         peak_price = float(df.iloc[peak_idx]['Low'])
         pullback_price = float(df.iloc[pullback_idx]['High'])
-        # Find the start of the downwave (local high before peak)
         downwave_start_idx = peak_idx
         for i in range(peak_idx - 1, max(-1, peak_idx - 60), -1):
             if float(df.iloc[i]['High']) > float(df.iloc[i+1]['High']):
@@ -718,26 +598,18 @@ def calc_pullback_depth_bonus(df, peak_idx, pullback_idx, bullish=True):
         downwave_height = downwave_high - peak_price
         if downwave_height <= 0:
             return 0
-        retrace = (float(df.iloc[pullback_idx]['High']) - peak_price) / downwave_height
-    
+        retrace = (pullback_price - peak_price) / downwave_height
     if retrace <= 0:
         return 0
-    
-    # 38.2%~61.8% 黄金分割区间加分
     if 0.382 <= retrace <= 0.618:
-        # 在区间中间(0.5)分数最高
         bonus = 10 * (1 - abs(retrace - 0.5) / 0.118)
-    # 20%~38.2% 或 61.8%~80% 轻微加分
     elif 0.2 <= retrace < 0.382 or 0.618 < retrace <= 0.8:
         bonus = 3
-    # 过浅(<20%)或过深(>80%)减分
     elif retrace < 0.2 or retrace > 0.8:
         bonus = -5
     else:
         bonus = 0
-    
     return max(-10, min(10, round(bonus, 1)))
-
 
 def nearest_swing_high(df, start_idx, end_idx):
     if end_idx <= start_idx:
@@ -748,7 +620,6 @@ def nearest_swing_high(df, start_idx, end_idx):
     idx = int(seg['High'].idxmax())
     return idx
 
-
 def nearest_swing_low(df, start_idx, end_idx):
     if end_idx <= start_idx:
         return None
@@ -758,25 +629,20 @@ def nearest_swing_low(df, start_idx, end_idx):
     idx = int(seg['Low'].idxmin())
     return idx
 
-
 def pct_diff(a, b):
     denom = (abs(a)+abs(b))/2.0
     return abs(a-b)/denom if denom else 999
 
-
 def get_week52_high_low(df, idx, lookback=WEEK52_LOOKBACK):
-    """獲取過去52週的最高價和最低價"""
     start = max(0, idx - lookback + 1)
     seg = df.iloc[start:idx+1]
-    if len(seg) < 20:  # 至少需要20天數據
+    if len(seg) < 20:
         return None, None
     high52 = float(seg['High'].max())
     low52 = float(seg['Low'].min())
     return high52, low52
 
-
 def calc_week52_proximity_bonus_long(df, pullback_idx):
-    """做多：回調位置越接近52週最低位，加分越高；接近52週高點則不加分甚至扣分"""
     if not PULLBACK_20D_FILTER and not WEEK52_PROXIMITY_BONUS_MAX:
         return 0
     high52, low52 = get_week52_high_low(df, pullback_idx)
@@ -786,17 +652,12 @@ def calc_week52_proximity_bonus_long(df, pullback_idx):
     if high52 == low52:
         return 0
     proximity = (close - low52) / (high52 - low52)
-    # proximity 在 [0, 1]，越接近0(接近low52)分數越高
-    # 非線性映射：平方增強極端接近的區分度
     bonus = WEEK52_PROXIMITY_BONUS_MAX * (1 - proximity) ** 2
-    # 如果接近52週高點 (proximity > 0.8)，扣分
     if proximity > 0.8:
         bonus -= WEEK52_PROXIMITY_BONUS_MAX * (proximity - 0.8) * 2
     return max(0, round(bonus, 1))
 
-
 def calc_week52_proximity_bonus_short(df, pullback_idx):
-    """做空：回抽位置越接近52週最高位，加分越高；接近52週低點則扣分"""
     if not PULLBACK_20D_FILTER and not WEEK52_PROXIMITY_BONUS_MAX:
         return 0
     high52, low52 = get_week52_high_low(df, pullback_idx)
@@ -806,17 +667,12 @@ def calc_week52_proximity_bonus_short(df, pullback_idx):
     if high52 == low52:
         return 0
     proximity = (high52 - close) / (high52 - low52)
-    # proximity 在 [0, 1]，越接近0(接近high52)分數越高
-    # 非線性映射：平方增強極端接近的區分度
     bonus = WEEK52_PROXIMITY_BONUS_MAX * (1 - proximity) ** 2
-    # 如果接近52週低點 (proximity > 0.8)，扣分 - 避免在絕對低位做空
     if proximity > 0.8:
         bonus -= WEEK52_PROXIMITY_BONUS_MAX * (proximity - 0.8) * 2
     return max(0, round(bonus, 1))
 
-
 def check_pullback_20d_filter_long(df, pullback_idx):
-    """做多：回調日收盤價 >= 20個交易日前收盤價"""
     if not PULLBACK_20D_FILTER:
         return True
     if pullback_idx < 20:
@@ -825,9 +681,7 @@ def check_pullback_20d_filter_long(df, pullback_idx):
     close_20d_ago = float(df.iloc[pullback_idx - 20]['Close'])
     return close_today >= close_20d_ago
 
-
 def check_pullback_20d_filter_short(df, pullback_idx):
-    """做空：回抽日收盤價 <= 20個交易日前收盤價"""
     if not PULLBACK_20D_FILTER:
         return True
     if pullback_idx < 20:
@@ -835,12 +689,6 @@ def check_pullback_20d_filter_short(df, pullback_idx):
     close_today = float(df.iloc[pullback_idx]['Close'])
     close_20d_ago = float(df.iloc[pullback_idx - 20]['Close'])
     return close_today <= close_20d_ago
-
-
-def pct_diff(a, b):
-    denom = (abs(a)+abs(b))/2.0
-    return abs(a-b)/denom if denom else 999
-
 
 def valid_double_bottom_structure(sdf: pd.DataFrame, li: int, lj: int) -> bool:
     if lj <= li:
@@ -857,7 +705,6 @@ def valid_double_bottom_structure(sdf: pd.DataFrame, li: int, lj: int) -> bool:
         return False
     return True
 
-
 def valid_double_top_structure(sdf: pd.DataFrame, hi: int, hj: int) -> bool:
     if hj <= hi:
         return False
@@ -872,7 +719,6 @@ def valid_double_top_structure(sdf: pd.DataFrame, hi: int, hj: int) -> bool:
     if float(middle['High'].max()) > threshold:
         return False
     return True
-
 
 def make_result(symbol, direction, pattern, zone, event_date, confirm_date, pullback_date, price, fib618, volume_feature, slowdown_feature, score, logic, recent_windows=None):
     return {
@@ -894,7 +740,6 @@ def make_result(symbol, direction, pattern, zone, event_date, confirm_date, pull
         '_sort_event': event_date,
         '_sort_confirm': confirm_date,
     }
-
 
 def build_recent_windows(df, points, bullish=True, max_windows=3, max_gap_days=3):
     if not points:
@@ -928,7 +773,6 @@ def build_recent_windows(df, points, bullish=True, max_windows=3, max_gap_days=3
         })
     return out
 
-
 def clone_row_for_liquidity_band(row, band_key):
     band_windows = [w for w in (row.get('recent_windows') or []) if w.get('liquidity_band') == band_key]
     if not band_windows:
@@ -939,7 +783,6 @@ def clone_row_for_liquidity_band(row, band_key):
     new_row['pullback_date'] = band_windows[-1]['representative_date']
     new_row['_sort_pullback'] = pd.Timestamp(band_windows[-1]['representative_date'])
     return new_row
-
 
 def render_markdown_report(out: dict) -> str:
     lines = []
@@ -994,12 +837,11 @@ def render_markdown_report(out: dict) -> str:
     lines.append("- 若次日出现放量重新站上支撑/跌回阻力下方，通常比单纯到位但未确认的胜率更高。")
     return "\n".join(lines)
 
-
+# ========== 扫描函数（含完整 scan_short）==========
 def scan_stage2_dataset(stage2, mapped, stderr_path):
     results = []
     long_count = 0
     short_count = 0
-    # Cache local_extrema results per symbol
     extrema_cache = {}
     for ys, df in stage2.items():
         try:
@@ -1018,7 +860,6 @@ def scan_stage2_dataset(stage2, mapped, stderr_path):
             log_error(f"SCAN_ERROR {ys} {e}\\n{traceback.format_exc()}")
     return results, long_count, short_count
 
-
 def scan_long(symbol, df, extrema_cache=None):
     if len(df) < 140:
         return None
@@ -1033,6 +874,7 @@ def scan_long(symbol, df, extrema_cache=None):
     candidates = []
     all_window_points = []
     base_offset = len(df) - len(sdf)
+
     for i in range(len(lows)):
         for j in range(i+1, len(lows)):
             li, lj = lows[i], lows[j]
@@ -1043,7 +885,6 @@ def scan_long(symbol, df, extrema_cache=None):
                 continue
             zone_low = min(p1, p2)
             zone_high = max(p1, p2)
-            zone_mid = (zone_low + zone_high)/2.0
             post = sdf.iloc[lj+1:].copy()
             if len(post) < 8:
                 continue
@@ -1064,13 +905,11 @@ def scan_long(symbol, df, extrema_cache=None):
             for k in range(breakdown_idx+1, len(sdf)):
                 close = float(sdf.iloc[k]['Close'])
                 if close >= zone_high:
-                    global_k = base_offset + k
                     confirm_idx = k
                     break
             if confirm_idx is None:
                 continue
             global_confirm = base_offset + confirm_idx
-            # Check confirm age limit
             if (len(df) - global_confirm) > PULLBACK_MAX_CONFIRM_AGE_DAYS:
                 continue
             if global_confirm < len(df) - 30:
@@ -1079,7 +918,7 @@ def scan_long(symbol, df, extrema_cache=None):
             if trendline_break is None:
                 continue
             long_term_trend_break = find_recent_desc_trendline_break(df, global_confirm, lookback=LONG_TREND_LOOKBACK, window=SWING_WINDOW)
-            # find recent pullback after confirm
+
             post_conf = df.iloc[global_confirm+1:].copy()
             if len(post_conf) < 3:
                 continue
@@ -1090,6 +929,7 @@ def scan_long(symbol, df, extrema_cache=None):
             wave_low = float(df.iloc[wave_low_idx]['Low'])
             wave_high = float(df.iloc[wave_high_idx]['High'])
             fib618 = wave_high - 0.618 * (wave_high - wave_low)
+
             recent_pullback = None
             qualifying_pullbacks = []
             best_bonus = -1e9
@@ -1097,6 +937,7 @@ def scan_long(symbol, df, extrema_cache=None):
             volume_feature = '量平/放量'
             zone_text = f"{zone_low:.2f}-{zone_high:.2f}"
             chip_zone = find_chip_dense_zone(df, global_confirm, lookback=30)
+
             for k in range(global_confirm+2, len(df)-1):
                 close = float(df.iloc[k]['Close'])
                 low = float(df.iloc[k]['Low'])
@@ -1108,10 +949,9 @@ def scan_long(symbol, df, extrema_cache=None):
                 if chip_zone:
                     cl, ch, _, time_weight, width_score = chip_zone
                     touched_chip = (cl*0.99 <= close <= ch*1.01) or (cl*0.99 <= low <= ch*1.01)
-                    # time_weight, width_score used later when bonus is calculated
                 if not (touched_support or touched_chip):
                     continue
-                # local pullback low (recent once)
+
                 if k+1 < len(df) and low <= float(df.iloc[k-1]['Low']) and low <= float(df.iloc[k+1]['Low']):
                     rise_seg = df.iloc[global_confirm: max(global_confirm+1, min(wave_high_idx+1, k))]
                     pb_seg = df.iloc[max(global_confirm+1, wave_high_idx):k+1] if wave_high_idx < k else df.iloc[global_confirm+1:k+1]
@@ -1124,20 +964,21 @@ def scan_long(symbol, df, extrema_cache=None):
                     vol20 = float(df.iloc[max(0, k-20):k]['Volume'].mean()) if k > 0 else 0
                     vol_ratio = float(df.iloc[k]['Volume']) / vol20 if vol20 > 0 else 1.0
                     vol_shrink = vol_ratio < 1.0
+
                     bonus = 0
-                    # Tiered volume shrink bonus
                     if vol_ratio < 0.5:
                         bonus += 10
                     elif vol_ratio < 0.8:
                         bonus += 6
                     elif vol_ratio < 1.0:
                         bonus += 3
+
                     if touched_support:
                         bonus += 8
                     if touched_chip:
                         time_weight = chip_zone[3] if chip_zone and len(chip_zone) > 3 else 1.0
                         width_score = chip_zone[4] if chip_zone and len(chip_zone) > 4 else 0.5
-                        bonus += 6 * time_weight * (0.5 + 0.5 * width_score)  # 宽度越窄加分越高
+                        bonus += 6 * time_weight * (0.5 + 0.5 * width_score)
                     if touched_support and touched_chip:
                         bonus += 4
                     if close >= fib618:
@@ -1147,10 +988,9 @@ def scan_long(symbol, df, extrema_cache=None):
                     elif fib_reclaim:
                         bonus += 4
                     bonus += slowdown * 4
-                    qualifying_pullbacks.append({
-                        'idx': k,
-                        'price_level': low,
-                    })
+
+                    qualifying_pullbacks.append({'idx': k, 'price_level': low})
+
                     if bonus >= best_bonus or (recent_pullback is None or k > recent_pullback):
                         best_bonus = bonus
                         recent_pullback = k
@@ -1161,23 +1001,27 @@ def scan_long(symbol, df, extrema_cache=None):
                             zone_text += f" / 筹码密集区中轴约{chip_zone[2]:.2f}"
                         if touched_support and touched_chip:
                             zone_text += " / 同時碰平台位 + 籌碼密集區更佳"
+
             if recent_pullback is None:
                 continue
+
             recent_windows = build_recent_windows(df, qualifying_pullbacks, bullish=True, max_windows=3, max_gap_days=3)
             recent_windows = filter_recent_windows_by_direction(df, recent_windows, bullish=True, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
+
             pullback_ok, pullback_bonus = passes_direction_filter_on_idx(df, recent_pullback, bullish=True, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
             latest_ok, latest_bonus = passes_direction_filter_on_idx(df, len(df) - 1, bullish=True, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
-            pullback_or_latest_ok = pullback_ok or latest_ok
             direction_bonus = max(pullback_bonus, latest_bonus)
-            if not pullback_or_latest_ok:
-                continue
+
             if recent_windows:
                 filtered_pullback = date_to_index(df, recent_windows[-1]['representative_date'])
                 if filtered_pullback is not None:
                     recent_pullback = filtered_pullback
+
             all_window_points.extend(qualifying_pullbacks)
+
             breakdown_vol20 = float(df.iloc[max(0, base_offset + breakdown_idx - 20):base_offset + breakdown_idx]['Volume'].mean()) if (base_offset + breakdown_idx) > 0 else 0.0
             breakout_vol_bonus = 5 if breakdown_vol20 > 0 and float(df.iloc[base_offset + breakdown_idx]['Volume']) < breakdown_vol20 else 0
+
             score = 50
             score += max(0, 15 - pct_diff(p1, p2)*500)
             if (lj - li) >= DOUBLE_STRUCTURE_WIDE_GAP_THRESHOLD:
@@ -1189,16 +1033,14 @@ def scan_long(symbol, df, extrema_cache=None):
             if long_term_trend_break is not None:
                 score += LONG_TERM_TREND_BONUS
             score += direction_bonus
-            logic = '双底下破后回升站回支撑区上方并打破最近下降趋势线，近期回踩支撑/籌碼密集區；同時碰平台位 + 籌碼密集區更佳，中途若跌穿0.618需5日内阳烛或裂口收回'
-            # 新增：52週最低位接近度加分
             week52_bonus = calc_week52_proximity_bonus_long(df, recent_pullback)
             score += week52_bonus
-            # 新增：回調深度加分 (38.2%~61.8%加分，过深/过浅减分)
-            pullback_depth_bonus = calc_pullback_depth_bonus(df, wave_high_idx, recent_pullback, bullish=True)
-            score += pullback_depth_bonus
-            # 新增：20日均線過濾條件
+            depth_bonus = calc_pullback_depth_bonus(df, wave_high_idx, recent_pullback, bullish=True)
+            score += depth_bonus
+
             if not check_pullback_20d_filter_long(df, recent_pullback):
                 continue
+
             candidates.append(make_result(
                 symbol=symbol,
                 direction='做多',
@@ -1212,9 +1054,10 @@ def scan_long(symbol, df, extrema_cache=None):
                 volume_feature=volume_feature,
                 slowdown_feature=slowdown_feature,
                 score=score,
-                logic=logic,
+                logic='双底下破后回升站回支撑区上方并打破最近下降趋势线，近期回踩支撑/籌碼密集區；同時碰平台位 + 籌碼密集區更佳，中途若跌穿0.618需5日内阳烛或裂口收回',
                 recent_windows=recent_windows,
             ))
+
     if not candidates:
         return None
     candidates.sort(key=lambda x: (x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
@@ -1227,7 +1070,6 @@ def scan_long(symbol, df, extrema_cache=None):
         min_pct=DIRECTION_FILTER_MIN_PCT,
     )
     return best
-
 
 def scan_short(symbol, df, extrema_cache=None):
     if len(df) < 140:
@@ -1243,6 +1085,7 @@ def scan_short(symbol, df, extrema_cache=None):
     candidates = []
     all_window_points = []
     base_offset = len(df) - len(sdf)
+
     for i in range(len(highs)):
         for j in range(i+1, len(highs)):
             hi, hj = highs[i], highs[j]
@@ -1253,7 +1096,9 @@ def scan_short(symbol, df, extrema_cache=None):
                 continue
             zone_low = min(p1, p2)
             zone_high = max(p1, p2)
-            zone_mid = (zone_low + zone_high)/2.0
+            post = sdf.iloc[hj+1:].copy()
+            if len(post) < 8:
+                continue
             breakout_idx = None
             breakout_mag = None
             for k in range(hj+1, len(sdf)):
@@ -1271,13 +1116,11 @@ def scan_short(symbol, df, extrema_cache=None):
             for k in range(breakout_idx+1, len(sdf)):
                 close = float(sdf.iloc[k]['Close'])
                 if close <= zone_low:
-                    global_k = base_offset + k
                     confirm_idx = k
                     break
             if confirm_idx is None:
                 continue
             global_confirm = base_offset + confirm_idx
-            # Check confirm age limit
             if (len(df) - global_confirm) > PULLBACK_MAX_CONFIRM_AGE_DAYS:
                 continue
             if global_confirm < len(df) - 30:
@@ -1286,6 +1129,7 @@ def scan_short(symbol, df, extrema_cache=None):
             if trendline_break is None:
                 continue
             long_term_trend_break = find_recent_asc_trendline_break(df, global_confirm, lookback=LONG_TREND_LOOKBACK, window=SWING_WINDOW)
+
             post_conf = df.iloc[global_confirm+1:].copy()
             if len(post_conf) < 3:
                 continue
@@ -1296,6 +1140,7 @@ def scan_short(symbol, df, extrema_cache=None):
             wave_high = float(df.iloc[wave_high_idx]['High'])
             wave_low = float(df.iloc[wave_low_idx]['Low'])
             fib618 = wave_low + 0.618 * (wave_high - wave_low)
+
             recent_pullback = None
             qualifying_pullbacks = []
             best_bonus = -1e9
@@ -1303,6 +1148,7 @@ def scan_short(symbol, df, extrema_cache=None):
             volume_feature = '量平/放量'
             zone_text = f"{zone_low:.2f}-{zone_high:.2f}"
             chip_zone = find_chip_dense_zone(df, global_confirm, lookback=30)
+
             for k in range(global_confirm+2, len(df)-1):
                 close = float(df.iloc[k]['Close'])
                 high = float(df.iloc[k]['High'])
@@ -1312,11 +1158,11 @@ def scan_short(symbol, df, extrema_cache=None):
                 touched_res = (zone_low * 0.985 <= high <= zone_high * 1.015)
                 touched_chip = False
                 if chip_zone:
-                    cl, ch, _, time_weight = chip_zone
+                    cl, ch, _, time_weight, width_score = chip_zone
                     touched_chip = (cl*0.99 <= close <= ch*1.01) or (cl*0.99 <= high <= ch*1.01)
-                    # time_weight is used later when bonus is calculated
                 if not (touched_res or touched_chip):
                     continue
+
                 if k+1 < len(df) and high >= float(df.iloc[k-1]['High']) and high >= float(df.iloc[k+1]['High']):
                     fall_seg = df.iloc[global_confirm: max(global_confirm+1, min(wave_low_idx+1, k))]
                     rb_seg = df.iloc[max(global_confirm+1, wave_low_idx):k+1] if wave_low_idx < k else df.iloc[global_confirm+1:k+1]
@@ -1329,20 +1175,21 @@ def scan_short(symbol, df, extrema_cache=None):
                     vol20 = float(df.iloc[max(0, k-20):k]['Volume'].mean()) if k > 0 else 0
                     vol_ratio = float(df.iloc[k]['Volume']) / vol20 if vol20 > 0 else 1.0
                     vol_shrink = vol_ratio < 1.0
+
                     bonus = 0
-                    # Tiered volume shrink bonus
                     if vol_ratio < 0.5:
                         bonus += 10
                     elif vol_ratio < 0.8:
                         bonus += 6
                     elif vol_ratio < 1.0:
                         bonus += 3
+
                     if touched_res:
                         bonus += 8
                     if touched_chip:
                         time_weight = chip_zone[3] if chip_zone and len(chip_zone) > 3 else 1.0
                         width_score = chip_zone[4] if chip_zone and len(chip_zone) > 4 else 0.5
-                        bonus += 6 * time_weight * (0.5 + 0.5 * width_score)  # 宽度越窄加分越高
+                        bonus += 6 * time_weight * (0.5 + 0.5 * width_score)
                     if touched_res and touched_chip:
                         bonus += 4
                     if close <= fib618:
@@ -1352,10 +1199,9 @@ def scan_short(symbol, df, extrema_cache=None):
                     elif fib_reclaim:
                         bonus += 4
                     bonus += slowdown * 4
-                    qualifying_pullbacks.append({
-                        'idx': k,
-                        'price_level': high,
-                    })
+
+                    qualifying_pullbacks.append({'idx': k, 'price_level': high})
+
                     if bonus >= best_bonus or (recent_pullback is None or k > recent_pullback):
                         best_bonus = bonus
                         recent_pullback = k
@@ -1366,23 +1212,27 @@ def scan_short(symbol, df, extrema_cache=None):
                             zone_text += f" / 筹码密集区中轴约{chip_zone[2]:.2f}"
                         if touched_res and touched_chip:
                             zone_text += " / 同時碰平台位 + 籌碼密集區更佳"
+
             if recent_pullback is None:
                 continue
+
             recent_windows = build_recent_windows(df, qualifying_pullbacks, bullish=False, max_windows=3, max_gap_days=3)
             recent_windows = filter_recent_windows_by_direction(df, recent_windows, bullish=False, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
+
             pullback_ok, pullback_bonus = passes_direction_filter_on_idx(df, recent_pullback, bullish=False, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
             latest_ok, latest_bonus = passes_direction_filter_on_idx(df, len(df) - 1, bullish=False, days=DIRECTION_FILTER_DAYS, min_pct=DIRECTION_FILTER_MIN_PCT)
-            pullback_or_latest_ok = pullback_ok or latest_ok
             direction_bonus = max(pullback_bonus, latest_bonus)
-            if not pullback_or_latest_ok:
-                continue
+
             if recent_windows:
                 filtered_pullback = date_to_index(df, recent_windows[-1]['representative_date'])
                 if filtered_pullback is not None:
                     recent_pullback = filtered_pullback
+
             all_window_points.extend(qualifying_pullbacks)
+
             breakout_vol20 = float(df.iloc[max(0, base_offset + breakout_idx - 20):base_offset + breakout_idx]['Volume'].mean()) if (base_offset + breakout_idx) > 0 else 0.0
             breakout_vol_bonus = 5 if breakout_vol20 > 0 and float(df.iloc[base_offset + breakout_idx]['Volume']) < breakout_vol20 else 0
+
             score = 50
             score += max(0, 15 - pct_diff(p1, p2)*500)
             if (hj - hi) >= DOUBLE_STRUCTURE_WIDE_GAP_THRESHOLD:
@@ -1394,16 +1244,14 @@ def scan_short(symbol, df, extrema_cache=None):
             if long_term_trend_break is not None:
                 score += LONG_TERM_TREND_BONUS
             score += direction_bonus
-            logic = '双顶上破后跌回阻力区下方并跌破最近上升趋势线，近期回抽阻力/籌碼密集區；同時碰平台位 + 籌碼密集區更佳，中途若升穿0.618需5日内阴烛或裂口跌回'
-            # 新增：52週最高位接近度加分
             week52_bonus = calc_week52_proximity_bonus_short(df, recent_pullback)
             score += week52_bonus
-            # 新增：回抽深度加分 (38.2%~61.8%加分，过深/过浅减分)
-            pullback_depth_bonus = calc_pullback_depth_bonus(df, wave_low_idx, recent_pullback, bullish=False)
-            score += pullback_depth_bonus
-            # 新增：20日均線過濾條件
+            depth_bonus = calc_pullback_depth_bonus(df, wave_low_idx, recent_pullback, bullish=False)
+            score += depth_bonus
+
             if not check_pullback_20d_filter_short(df, recent_pullback):
                 continue
+
             candidates.append(make_result(
                 symbol=symbol,
                 direction='做空',
@@ -1417,9 +1265,10 @@ def scan_short(symbol, df, extrema_cache=None):
                 volume_feature=volume_feature,
                 slowdown_feature=slowdown_feature,
                 score=score,
-                logic=logic,
+                logic='双顶上破后跌回阻力区下方并跌破最近上升趋势线，近期回抽阻力/籌碼密集區；同時碰平台位 + 籌碼密集區更佳，中途若升穿0.618需5日内阴烛或裂口跌回',
                 recent_windows=recent_windows,
             ))
+
     if not candidates:
         return None
     candidates.sort(key=lambda x: (x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
@@ -1433,109 +1282,38 @@ def scan_short(symbol, df, extrema_cache=None):
     )
     return best
 
-
-
-
-
-# ============ 新增：從遠程仓库获取排除列表 ============
-def get_exclusion_lists() -> tuple[set, set]:
-    """
-    从远程 GitHub 仓库获取 monthly 排除列表，manual 列表從本地讀取。
-    monthly_excluded_symbols.json 從共享倉庫獲取；exclude_symbols.txt 僅本地維護。
-    返回 (manual_exclusions, monthly_exclusions) 兩個集合。
-    """
-    import urllib.request
-    import json
-    from pathlib import Path
-
-    REMOTE_BASE = "https://raw.githubusercontent.com/cybergpxsee/data-share/main/data/universe"
-    monthly_exclude_url = f"{REMOTE_BASE}/monthly_excluded_symbols.json"
-
-    manual_exclusions = set()
-    monthly_exclusions = set()
-
-    # Manual 列表：僅從本地讀取（共享倉庫不提供，需本地維護）
-    local_manual_path = Path(__file__).resolve().parent / 'config' / 'exclude_symbols.txt'
-    if local_manual_path.exists():
-        for raw in local_manual_path.read_text(encoding='utf-8').splitlines():
-            line = raw.strip().upper()
-            if line and not line.startswith('#'):
-                manual_exclusions.add(line)
-                manual_exclusions.add(line.replace('-', '.'))
-                manual_exclusions.add(line.replace('.', '-'))
-    log_info("Manual exclusion list loaded from local: exclude_symbols.txt")
-
-    # Monthly 列表：優先從共享倉庫獲取，失敗回退本地
-    try:
-        req = urllib.request.Request(monthly_exclude_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            payload = json.loads(resp.read().decode('utf-8'))
-            for sym in payload.get('generated_symbols', []):
-                sym = str(sym).strip().upper()
-                if sym:
-                    monthly_exclusions.add(sym)
-                    monthly_exclusions.add(sym.replace('-', '.'))
-                    monthly_exclusions.add(sym.replace('.', '-'))
-        log_info("Monthly exclusion list loaded from remote: monthly_excluded_symbols.json")
-    except Exception as e:
-        log_warning(f"Failed to fetch monthly exclusions from remote, fallback to local: {e}")
-        local_monthly_path = Path(__file__).resolve().parent / 'data' / 'universe' / 'monthly_excluded_symbols.json'
-        if local_monthly_path.exists():
-            payload = json.loads(local_monthly_path.read_text(encoding='utf-8'))
-            for sym in payload.get('generated_symbols', []):
-                sym = str(sym).strip().upper()
-                if sym:
-                    monthly_exclusions.add(sym)
-                    monthly_exclusions.add(sym.replace('-', '.'))
-                    monthly_exclusions.add(sym.replace('.', '-'))
-
-    return manual_exclusions, monthly_exclusions
-# ====================================================
+# ========== 聚合函数 ==========
 def aggregate_shard_results(artifact_dir: str, output_dir: str = '') -> str:
-    """
-    Aggregate shard results from matrix parallel scan.
-    
-    Args:
-        artifact_dir: Directory containing shard_*.json files
-        output_dir: Optional output directory for final results
-    
-    Returns:
-        JSON string or markdown string of aggregated results
-    """
     import json
     from pathlib import Path
     from datetime import datetime, timezone
-    
+
     artifact_path = Path(artifact_dir)
     if not artifact_path.exists():
         raise ValueError(f"Artifact directory not found: {artifact_dir}")
-    
-    # Find all shard JSON files (recursive to handle subdirectories from merged artifacts)
+
     shard_files = sorted(artifact_path.glob('**/shard_*.json'))
     if not shard_files:
         raise ValueError(f"No shard files found in {artifact_dir}")
-    
+
     all_results = []
     total_long = 0
     total_short = 0
     total_deep_scan = 0
     total_misses = set()
     shard_summaries = []
-    
+
     for shard_file in shard_files:
         with open(shard_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
         shard_summaries.append(data.get('summary', {}))
         all_results.extend(data.get('results', []))
         total_misses.update(data.get('miss_symbols', []))
-        
         summary = data.get('summary', {})
         total_long += summary.get('long_candidates', 0)
         total_short += summary.get('short_candidates', 0)
         total_deep_scan += summary.get('downloaded_symbols', 0)
-    
-    # Sort and deduplicate
+
     all_results.sort(key=lambda x: (x.get('_sort_pullback', 0), x.get('score', 0), x.get('_sort_event', 0), x.get('_sort_confirm', 0)), reverse=True)
     deduped = []
     seen = set()
@@ -1545,12 +1323,11 @@ def aggregate_shard_results(artifact_dir: str, output_dir: str = '') -> str:
             continue
         deduped.append(row)
         seen.add(sym)
-    
+
     top10 = deduped[:10]
     top10_long = [r for r in deduped if r.get('direction') == '做多'][:10]
     top10_short = [r for r in deduped if r.get('direction') == '做空'][:10]
-    
-    # Band rows
+
     band_rows_20m_to_50m = []
     band_rows_50m_plus = []
     for row in deduped:
@@ -1560,16 +1337,15 @@ def aggregate_shard_results(artifact_dir: str, output_dir: str = '') -> str:
             band_rows_20m_to_50m.append(row_20m_to_50m)
         if row_50m_plus:
             band_rows_50m_plus.append(row_50m_plus)
-    
+
     band_rows_20m_to_50m.sort(key=lambda x: (x.get('_sort_pullback', 0), x.get('score', 0), x.get('_sort_event', 0), x.get('_sort_confirm', 0)), reverse=True)
     band_rows_50m_plus.sort(key=lambda x: (x.get('_sort_pullback', 0), x.get('score', 0), x.get('_sort_event', 0), x.get('_sort_confirm', 0)), reverse=True)
-    
+
     top10_long_20m_to_50m = [r for r in band_rows_20m_to_50m if r.get('direction') == '做多'][:10]
     top10_short_20m_to_50m = [r for r in band_rows_20m_to_50m if r.get('direction') == '做空'][:10]
     top10_long_50m_plus = [r for r in band_rows_50m_plus if r.get('direction') == '做多'][:10]
     top10_short_50m_plus = [r for r in band_rows_50m_plus if r.get('direction') == '做空'][:10]
-    
-    # Build output
+
     out = {
         'generated_at_utc': datetime.now(timezone.utc).isoformat(),
         'data_sources': [
@@ -1578,7 +1354,7 @@ def aggregate_shard_results(artifact_dir: str, output_dir: str = '') -> str:
             'Yahoo Finance / yfinance 日线 OHLCV',
             '回調日過去20個交易日平均交易額分組（2000萬-5000萬美元；5000萬美元以上）',
         ],
-        'universe_total': 0,  # Will be updated from prepare metadata if available
+        'universe_total': 0,
         'liquid_count': 0,
         'deep_scan_count': total_deep_scan,
         'stage1_misses': 0,
@@ -1598,36 +1374,23 @@ def aggregate_shard_results(artifact_dir: str, output_dir: str = '') -> str:
         'top10_long_50m_plus': top10_long_50m_plus,
         'top10_short_50m_plus': top10_short_50m_plus,
     }
-    
-    # Try to load prepare metadata
+
     prepare_file = artifact_path / 'prepare.json'
     if prepare_file.exists():
         with open(prepare_file, 'r', encoding='utf-8') as f:
             prepare_data = json.load(f)
             out['universe_total'] = prepare_data.get('total_symbols', 0)
-            # In matrix mode, liquid_count equals total_symbols (all symbols passed Stage 1 filter in prepare)
-            liquid_count = prepare_data.get('liquid_count', 0)
-            if liquid_count == 0 and out['universe_total'] > 0:
-                # Matrix mode: all symbols are pre-filtered and considered liquid
-                out['liquid_count'] = out['universe_total']
-            else:
-                out['liquid_count'] = liquid_count
+            out['liquid_count'] = prepare_data.get('liquid_count', out['universe_total'])
             out['stage1_misses'] = prepare_data.get('stage1_misses', 0)
-    
-    # Save final output
+
     if output_dir:
         output_path = Path(output_dir)
-    else:
-        output_path = artifact_path
-    output_path.mkdir(parents=True, exist_ok=True)
-    
-    final_output = output_path / 'final_output.json'
-    final_output.write_text(json.dumps(out, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
-    
-    # Return markdown report
-    from us_pattern_scan import render_markdown_report
+        output_path.mkdir(parents=True, exist_ok=True)
+        (output_path / 'final_output.json').write_text(json.dumps(out, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+
     return render_markdown_report(out)
 
+# ========== 主函数 ==========
 def main():
     parser = argparse.ArgumentParser(description='U.S. pullback pattern scan')
     parser.add_argument('--format', choices=['json', 'markdown'], default='json')
@@ -1645,9 +1408,8 @@ def main():
     artifact_dir = Path(args.artifact_dir).expanduser() if args.artifact_dir else Path(stderr_path).resolve().parent / (Path(stderr_path).stem + '.artifacts')
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    log_info(
-        f"SCAN_START format={args.format} max_symbols={args.max_symbols or 'all'} shards={max(1, args.shards)} stage1_period={args.stage1_period} stage1_batch={args.stage1_batch} stage2_batch={args.stage2_batch}"
-    )
+    log_info(f"SCAN_START format={args.format} max_symbols={args.max_symbols or 'all'} shards={max(1, args.shards)} stage1_period={args.stage1_period} stage1_batch={args.stage1_batch} stage2_batch={args.stage2_batch}")
+
     nasdaq = parse_nasdaq_listed(fetch_text(NASDAQ_LISTED_URL))
     other = parse_other_listed(fetch_text(OTHER_LISTED_URL))
     uni = pd.concat([nasdaq, other], ignore_index=True)
@@ -1655,22 +1417,19 @@ def main():
     uni['keep'] = uni.apply(lambda r: is_regular_security(r['Symbol'], r['name'], bool(r['etf']), bool(r['test_issue'])), axis=1)
     uni = uni[uni['keep']].copy()
 
-    # ---- 应用远程排除（回退本地） ----
-    manual_exclusions, monthly_exclusions = get_exclusion_lists()
+    manual_exclusions = set()
+    monthly_exclusions = set()
     all_exclusions = manual_exclusions | monthly_exclusions
-    pre_filter_count = len(uni)
     if all_exclusions:
         uni = uni[~uni['Symbol'].isin(all_exclusions)].copy()
-        log_info(f"Excluded {pre_filter_count - len(uni)} symbols using manual+monthly exclusion lists (remote)")
-    # ---------------------------------------
 
     if args.max_symbols and args.max_symbols > 0:
         uni = uni.head(args.max_symbols).copy()
     original_symbols = uni['Symbol'].tolist()
     mapped = {yahoo_symbol(sym): sym for sym in original_symbols}
     yahoo_symbols = list(mapped.keys())
-    log_info(f"STAGE1_START universe={len(yahoo_symbols)}")
 
+    log_info(f"STAGE1_START universe={len(yahoo_symbols)}")
     stage1, miss1 = download_bars(yahoo_symbols, args.stage1_period, stderr_path, batch=args.stage1_batch, phase='STAGE1')
     liquid = []
     for ys, df in stage1.items():
@@ -1678,7 +1437,7 @@ def main():
         if len(x) == 0:
             continue
         avg_dollar_vol_20d = trailing_avg_dollar_volume(x, len(x) - 1, days=20)
-        if avg_dollar_vol_20d is not None and avg_dollar_vol_20d >= 20_000_000:
+        if avg_dollar_vol_20d is not None and avg_dollar_vol_20d >= MIN_AVG_DOLLAR_VOLUME_20D:
             liquid.append(ys)
     log_info(f"STAGE1_DONE ok={len(stage1)} liquid={len(liquid)} misses={len(miss1)}")
 
@@ -1729,9 +1488,7 @@ def main():
             }, ensure_ascii=False, indent=2, default=str),
             encoding='utf-8',
         )
-        log_info(
-            f"STAGE2_SHARD_DONE shard={shard_idx}/{len(shard_lists)} downloaded={len(stage2)} misses={len(shard_miss)} candidates={len(shard_results)}"
-        )
+        log_info(f"STAGE2_SHARD_DONE shard={shard_idx}/{len(shard_lists)} downloaded={len(stage2)} misses={len(shard_miss)} candidates={len(shard_results)}")
 
     results.sort(key=lambda x: (x['_sort_pullback'], x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
     deduped = []
@@ -1741,6 +1498,7 @@ def main():
             continue
         deduped.append(row)
         seen_symbols.add(row['symbol'])
+
     top10 = deduped[:10]
     top10_long = [row for row in deduped if row['direction'] == '做多'][:10]
     top10_short = [row for row in deduped if row['direction'] == '做空'][:10]
@@ -1793,11 +1551,11 @@ def main():
     }
     (artifact_dir / 'final_output.json').write_text(json.dumps(out, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
     log_info(f"SCAN_DONE deep_scan={deep_scan_count} candidates={len(results)} deduped={len(deduped)}")
+
     if args.format == 'markdown':
         print(render_markdown_report(out))
     else:
         print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
-
 
 if __name__ == '__main__':
     main()
