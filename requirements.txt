@@ -1,6 +1,6 @@
-yfinance
-pandas
-numpy
-pyarrow   # 用于 parquet 缓存
-# curl_cffi 可选，如需更稳健下载可安装
-# curl_cffi
+yfinance==0.2.51
+pandas==2.2.2
+numpy==1.26.4
+requests==2.32.3
+curl_cffi==0.15.0
+PyYAML==6.0.2

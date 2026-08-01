@@ -131,7 +131,7 @@ def create_discord_payload(scan_result: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "embeds": [embed],
         "username": "Pullback Scanner",
-        "avatar_url": "https://cdn.discordapp.com/emojis/123456789.png"
+        "avatar_url": "https://raw.githubusercontent.com/github/explore/main/topics/discord/discord.png"
     }
 
 
