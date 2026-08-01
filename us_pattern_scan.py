@@ -204,7 +204,7 @@ def split_into_shards(seq, shard_count):
 
 
 
-def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
+def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD', interval='1d'):
     from cache_utils import get_cache
     cache = get_cache()
     
@@ -231,7 +231,7 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
             stderr_path=stderr_path,
             batch=batch,
             phase=phase,
-            interval='1d',
+            interval=interval,
             prefer_backend='curl_cffi'
         )
         # 缓存新下载的数据
