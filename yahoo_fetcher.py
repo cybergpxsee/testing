@@ -129,7 +129,10 @@ def fetch_yahoo_chart_curl(
             elif resp.status_code != 200:
                 raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
             
-            data = resp.json()
+            try:
+                data = resp.json()
+            except Exception as e:
+                raise RuntimeError(f"Invalid JSON response: {e}")
             
             if not data.get("chart", {}).get("result"):
                 if stderr_path:
@@ -319,8 +322,9 @@ def download_bars(
         # Use yfinance batch mode for daily data
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
-        def is_rate_limit_error(err):
-            return is_rate_limit_error(err)
+        def is_rate_limit_error_local(err):
+            err_str = str(err).lower()
+            return "429" in err_str or "too many requests" in err_str or "rate limit" in err_str
         
         total_batches = max(1, math.ceil(len(symbols) / batch))
         
@@ -345,7 +349,7 @@ def download_bars(
                 except Exception as e:
                     last_err = e
                 
-                if is_rate_limit_error(last_err):
+                if is_rate_limit_error_local(last_err):
                     wait_s = 60 * (2 ** (attempt - 1)) + random.uniform(0, 30)
                     append_log(stderr_path, f"{phase}_RATE_LIMIT batch={group_idx} attempt={attempt}/7 wait={wait_s:.0f}s err={last_err}")
                 else:
