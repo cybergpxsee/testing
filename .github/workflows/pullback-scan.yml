@@ -26,49 +26,32 @@ on:
       universe_shards:
         description: 'Shard count before workers start'
         required: false
-        default: '18'
+        default: '12'
       worker_concurrency:
         description: 'How many workers to run in parallel'
         required: false
-        default: '6'
+        default: '4'
       worker_stagger:
         description: 'Seconds to stagger worker launches'
         required: false
         default: '0.5'
-  
+      worker_shards_per_job:
+        description: 'Shards per parallel job'
+        required: false
+        default: '3'
+
+permissions:
+  contents: read
 
 jobs:
-  scan:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 100
-    env:
-      PYTHONUNBUFFERED: '1'
-      HERMES_SCAN_MAX_SYMBOLS: ${{ github.event.inputs.max_symbols || '' }}
-      HERMES_SCAN_STAGE1_PERIOD: ${{ github.event.inputs.stage1_period || '1mo' }}
-      HERMES_SCAN_STAGE1_BATCH: ${{ github.event.inputs.stage1_batch || '120' }}
-      HERMES_SCAN_STAGE2_BATCH: ${{ github.event.inputs.stage2_batch || '100' }}
-      HERMES_SCAN_UNIVERSE_SHARDS: ${{ github.event.inputs.universe_shards || '12' }}
-      HERMES_SCAN_WORKER_CONCURRENCY: ${{ github.event.inputs.worker_concurrency || '3' }}
-      HERMES_SCAN_WORKER_STAGGER: ${{ github.event.inputs.worker_stagger || '1' }}
-      HERMES_SCAN_STAGE2_SHARDS_PER_WORKER: '1'
+    outputs:
+      matrix: ${{ steps.prepare.outputs.matrix }}
+      shard_count: ${{ steps.prepare.outputs.shard_count }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      # === 新增：從共享倉庫拉取股票池 ===
-      - name: Pull shared universe data
-        uses: actions/checkout@v4
-        with:
-          repository: cybergpxsee/data-share
-          path: .tmp/shared-universe
-          fetch-depth: 1
-          # 如果倉庫是私有的，請取消註解並設定 secret：
-          # token: ${{ secrets.PAT_FOR_DATA_SHARE }}
-
-      - name: Copy universe files to local data/universe
-        run: |
-          mkdir -p data/universe
-          cp -r .tmp/shared-universe/data/universe/* data/universe/
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -81,12 +64,240 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      # === 已移除 Ensure local universe cache exists 步驟（現由共享倉庫提供） ===
+      - name: Prepare scan workspace
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          UNIVERSE_SHARDS="${{ github.event.inputs.universe_shards || '12' }}"
+          WORKER_SHARDS_PER_JOB="${{ github.event.inputs.worker_shards_per_job || '3' }}"
+          # WORKSPACE_DIR is now provided via env
+          
+          python - <<'PY'
+          import json
+          import os
+          import pandas as pd
+          import sys
+          sys.path.insert(0, '.')
+          
+          from us_pattern_scan import (
+              parse_nasdaq_listed, parse_other_listed, fetch_text,
+              NASDAQ_LISTED_URL, OTHER_LISTED_URL,
+              is_regular_security, yahoo_symbol,
+              trailing_avg_dollar_volume
+          )
+          
+          nasdaq = parse_nasdaq_listed(fetch_text(NASDAQ_LISTED_URL))
+          other = parse_other_listed(fetch_text(OTHER_LISTED_URL))
+          uni = pd.concat([nasdaq, other], ignore_index=True)
+          uni = uni.drop_duplicates(subset=['Symbol']).reset_index(drop=True)
+          uni['keep'] = uni.apply(
+              lambda r: is_regular_security(r['Symbol'], r['name'], bool(r['etf']), bool(r['test_issue'])),
+              axis=1
+          )
+          uni = uni[uni['keep']].copy()
+          uni['Symbol'] = uni['Symbol'].map(lambda x: str(x).upper())
+          uni['yahoo_symbol'] = uni['Symbol'].map(lambda x: yahoo_symbol(str(x)))
+          
+          symbols = uni['yahoo_symbol'].tolist()
+          
+          # Load exclusion lists from remote (with local fallback)
+          from us_pattern_scan import get_exclusion_lists
+          manual_exclude, monthly_exclude = get_exclusion_lists()
+          all_exclusions = manual_exclude | monthly_exclude
+          
+          # Filter
+          filtered_symbols = [s for s in symbols if s not in all_exclusions]
+          
+          # Split into shards
+          shard_count = int(os.environ['UNIVERSE_SHARDS'])
+          worker_shards = int(os.environ['WORKER_SHARDS_PER_JOB'])
+          
+          shard_lists = []
+          for i in range(shard_count):
+              shard_lists.append([])
+          for idx, sym in enumerate(filtered_symbols):
+              shard_lists[idx % shard_count].append(sym)
+          
+          # Create matrix: each job gets WORKER_SHARDS_PER_JOB shards
+          matrix = []
+          job_idx = 1
+          for i in range(0, shard_count, worker_shards):
+              shard_indices = list(range(i, min(i + worker_shards, shard_count)))
+              job_symbols = []
+              for si in shard_indices:
+                  job_symbols.extend(shard_lists[si])
+              if job_symbols:
+                  matrix.append({
+                      'shard_index': job_idx,
+                      'shard_indices': shard_indices,
+                      'symbols': job_symbols,
+                      'symbol_count': len(job_symbols)
+                  })
+                  job_idx += 1
+          
+          workspace_dir = os.environ['WORKSPACE_DIR']
+          os.makedirs(workspace_dir, exist_ok=True)
+          
+          # Save for workers
+          for job in matrix:
+              shard_path = os.path.join(workspace_dir, f'shard_{job["shard_index"]:02d}.json')
+              with open(shard_path, 'w', encoding='utf-8') as f:
+                  json.dump(job, f, ensure_ascii=False)
+          
+          # Save prepare metadata
+          with open(os.path.join(workspace_dir, 'prepare.json'), 'w', encoding='utf-8') as f:
+              json.dump({
+                  'status': 'prepared',
+                  'total_symbols': len(filtered_symbols),
+                  'shard_count': shard_count,
+                  'matrix': matrix
+              }, f, ensure_ascii=False, indent=2)
+          
+          # Output for matrix - write to GITHUB_OUTPUT
+          github_output = os.environ.get('GITHUB_OUTPUT', '/dev/stdout')
+          with open(github_output, 'a', encoding='utf-8') as f:
+              f.write(f"matrix={json.dumps(matrix, separators=(',', ':'))}\n")
+              f.write(f"shard_count={shard_count}\n")
+              f.write(f"status=prepared\n")
+          
+          PY
+        env:
+          UNIVERSE_SHARDS: ${{ github.event.inputs.universe_shards || '12' }}
+          WORKER_SHARDS_PER_JOB: ${{ github.event.inputs.worker_shards_per_job || '3' }}
+          WORKSPACE_DIR: .tmp/scan_prepare
 
-      - name: Run scan
+      - name: Upload prepare workspace
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-prepare
+          path: .tmp/scan_prepare
+          retention-days: 2
+
+  scan:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.matrix || '[]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      - name: Download prepare workspace
+        uses: actions/download-artifact@v4
+        with:
+          name: scan-prepare
+          path: .tmp/scan_prepare
+
+      - name: Run scan shard
         env:
           HERMES_SCAN_STAGE2_PERIOD: ${{ github.event.inputs.stage2_period || '1y' }}
-        run: bash scripts/run_scan.sh
+          HERMES_SCAN_FORMAT: markdown
+          HERMES_SCAN_MAX_SYMBOLS: ${{ github.event.inputs.max_symbols || '0' }}
+          HERMES_SCAN_STAGE1_PERIOD: ${{ github.event.inputs.stage1_period || '1mo' }}
+          HERMES_SCAN_STAGE1_BATCH: ${{ github.event.inputs.stage1_batch || '120' }}
+          HERMES_SCAN_STAGE2_BATCH: ${{ github.event.inputs.stage2_batch || '100' }}
+          HERMES_SCAN_SHARDS: 1
+          HERMES_SCAN_ARTIFACT_DIR: ${{ runner.temp }}/artifacts/shard_${{ matrix.shard_index }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shard files are saved with zero-padded index (e.g., shard_01.json, shard_02.json)
+          SHARD_NUM=$(printf "%02d" ${{ matrix.shard_index }})
+          SHARD_JSON=".tmp/scan_prepare/shard_${SHARD_NUM}.json"
+          SYMBOLS=$(jq -r '.symbols | join(",")' "$SHARD_JSON")
+          echo "Running scan for shard ${{ matrix.shard_index }} with ${{ matrix.symbol_count }} symbols"
+          
+          python scripts/scan_cli.py \
+            --format markdown \
+            --symbols "$SYMBOLS" \
+            --stderr-path ${{ runner.temp }}/scan_shard_${{ matrix.shard_index }}_stderr.log \
+            --shards 1 \
+            --artifact-dir ${{ runner.temp }}/artifacts/shard_${{ matrix.shard_index }} \
+            --stage1-period ${{ github.event.inputs.stage1_period || '1mo' }} \
+            --stage1-batch ${{ github.event.inputs.stage1_batch || '120' }} \
+            --stage2-batch ${{ github.event.inputs.stage2_batch || '100' }} \
+            --shard-index ${{ matrix.shard_index }} \
+            --total-shards ${{ needs.prepare.outputs.shard_count }}
+
+      - name: Upload shard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-shard-${{ matrix.shard_index }}
+          path: ${{ runner.temp }}/artifacts/shard_${{ matrix.shard_index }}/
+          retention-days: 2
+
+  aggregate:
+    needs: [prepare, scan]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Download scan shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scan-shard-*
+          merge-multiple: false
+          path: .tmp/scan_artifacts
+
+      - name: Download prepare workspace
+        uses: actions/download-artifact@v4
+        with:
+          name: scan-prepare
+          path: .tmp/scan_prepare
+
+      - name: Flatten shard artifacts for aggregate
+        run: |
+          # Each shard artifact is in .tmp/scan_artifacts/scan-shard-N/shard_01.json
+          # Move all shard_*.json to .tmp/scan_artifacts/ with unique names
+          mkdir -p .tmp/scan_artifacts/flattened
+          for dir in .tmp/scan_artifacts/scan-shard-*/; do
+            shard_num=$(basename "$dir" | sed 's/scan-shard-//')
+            if [ -f "$dir/shard_01.json" ]; then
+              cp "$dir/shard_01.json" ".tmp/scan_artifacts/flattened/shard_${shard_num}.json"
+            fi
+          done
+          # Copy prepare.json
+          cp .tmp/scan_prepare/prepare.json .tmp/scan_artifacts/flattened/prepare.json
+
+      - name: Aggregate results
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/scan_cli.py \
+            --format markdown \
+            --aggregate .tmp/scan_artifacts/flattened \
+            --output output/
 
       - name: Upload output artifacts
         uses: actions/upload-artifact@v4
@@ -98,15 +309,23 @@ jobs:
       - name: Append latest markdown to job summary
         shell: bash
         run: |
-          latest_md=$(find output -name 'pullback_scan.md' | sort | tail -n 1)
-          echo '## Latest report' >> "$GITHUB_STEP_SUMMARY"
-          echo '' >> "$GITHUB_STEP_SUMMARY"
-          cat "$latest_md" >> "$GITHUB_STEP_SUMMARY"
+          latest_md=$(find output -name 'us_pullback_scan.md' -o -name 'pullback_scan.md' | sort | tail -n 1)
+          if [ -f "$latest_md" ]; then
+            echo '## Latest report' >> "$GITHUB_STEP_SUMMARY"
+            echo '' >> "$GITHUB_STEP_SUMMARY"
+            cat "$latest_md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No markdown report found"
+          fi
 
       - name: Generate Discord embed payload
         run: |
-          latest_json=$(find output -name 'pullback_scan.json' | sort | tail -n 1)
-          python scripts/render_discord.py "$latest_json" output/
+          latest_json=$(find output -name 'final_output.json' | sort | tail -n 1)
+          if [ -f "$latest_json" ]; then
+            python scripts/render_discord.py "$latest_json" output/
+          else
+            echo "No JSON report found"
+          fi
 
       - name: Upload Discord payload artifact
         uses: actions/upload-artifact@v4
