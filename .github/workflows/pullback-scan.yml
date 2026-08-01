@@ -101,29 +101,9 @@ jobs:
           
           symbols = uni['yahoo_symbol'].tolist()
           
-          # Load exclusion lists
-          manual_exclude = set()
-          if os.path.exists('config/exclude_symbols.txt'):
-              with open('config/exclude_symbols.txt', 'r', encoding='utf-8') as f:
-                  for line in f:
-                      line = line.strip().upper()
-                      if line and not line.startswith('#'):
-                          manual_exclude.add(line)
-                          manual_exclude.add(line.replace('-', '.'))
-                          manual_exclude.add(line.replace('.', '-'))
-          
-          monthly_exclude = set()
-          monthly_path = 'data/universe/monthly_excluded_symbols.json'
-          if os.path.exists(monthly_path):
-              import json
-              payload = json.load(open(monthly_path, 'r', encoding='utf-8'))
-              for sym in payload.get('generated_symbols', []):
-                  s = str(sym).strip().upper()
-                  if s:
-                      monthly_exclude.add(s)
-                      monthly_exclude.add(s.replace('-', '.'))
-                      monthly_exclude.add(s.replace('.', '-'))
-          
+          # Load exclusion lists from remote (with local fallback)
+          from us_pattern_scan import get_exclusion_lists
+          manual_exclude, monthly_exclude = get_exclusion_lists()
           all_exclusions = manual_exclude | monthly_exclude
           
           # Filter
