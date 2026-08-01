@@ -457,6 +457,34 @@ def filter_recent_windows_by_direction(df, windows, bullish=True, days=5, min_pc
     return filtered
 
 
+def add_liquidity_band_to_windows(df, windows):
+    """為窗口添加流動性分組信息（不進行方向過濾）"""
+    if not windows:
+        return []
+    date_to_idx = {
+        pd.Timestamp(row['Date']).strftime('%Y-%m-%d'): i
+        for i, row in df.iterrows()
+    }
+    result = []
+    for w in windows:
+        rep_date = w.get('representative_date')
+        if not rep_date:
+            continue
+        idx = date_to_idx.get(str(rep_date))
+        if idx is None:
+            continue
+        avg_dollar_volume = trailing_avg_dollar_volume(df, idx, days=20)
+        liquidity_band = liquidity_band_from_avg_dollar_volume(avg_dollar_volume)
+        if not liquidity_band:
+            continue
+        new_w = dict(w)
+        avg_dollar_volume_val = float(avg_dollar_volume if avg_dollar_volume is not None else 0.0)
+        new_w['avg_20d_dollar_volume'] = round(avg_dollar_volume_val, 2)
+        new_w['liquidity_band'] = liquidity_band
+        result.append(new_w)
+    return result
+
+
 def date_to_index(df, date_str):
     matches = df.index[df['Date'].dt.strftime('%Y-%m-%d') == str(date_str)].tolist()
     return matches[0] if matches else None
@@ -1210,6 +1238,8 @@ def scan_long(symbol, df):
                 continue
             # MOD1A: 移除硬條件方向過濾 - 直接使用所有 qualifying pullbacks
             recent_windows = build_recent_windows(df, qualifying_pullbacks, bullish=True, max_windows=3, max_gap_days=3)
+            # 為窗口添加流動性分組（不進行方向過濾）
+            recent_windows = add_liquidity_band_to_windows(df, recent_windows)
             # MOD1A: 不再過濾方向
             if recent_windows:
                 filtered_pullback = date_to_index(df, recent_windows[-1]['representative_date'])
@@ -1390,6 +1420,8 @@ def scan_short(symbol, df):
                 continue
             # MOD1A: 移除硬條件方向過濾 - 直接使用所有 qualifying pullbacks
             recent_windows = build_recent_windows(df, qualifying_pullbacks, bullish=False, max_windows=3, max_gap_days=3)
+            # 為窗口添加流動性分組（不進行方向過濾）
+            recent_windows = add_liquidity_band_to_windows(df, recent_windows)
             # MOD1A: 不再過濾方向
             if recent_windows:
                 filtered_pullback = date_to_index(df, recent_windows[-1]['representative_date'])

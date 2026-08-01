@@ -1,0 +1,10 @@
+# One symbol per line. Comments and blank lines are ignored.
+# Symbols here are excluded before sharding the universe.
+DMC
+HONA
+LADM
+MBGL-V
+MWHS
+OTAI
+PSEP
+SPGI-V
