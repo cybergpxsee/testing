@@ -25,7 +25,7 @@ from us_pattern_scan import (
     make_result, clone_row_for_liquidity_band,
     render_markdown_report,
     aggregate_shard_results,
-    get_exclusion_lists,  # 新增导入
+    get_exclusion_lists,
 )
 
 
@@ -100,14 +100,15 @@ def run_scan(
         )
         uni = uni[uni['keep']].copy()
         
-        # ---- 使用远程排除列表（回退本地） ----
+        # ---- Load exclusion pool from remote (with local fallback) ----
         manual_exclusions, monthly_exclusions = get_exclusion_lists()
         all_exclusions = manual_exclusions | monthly_exclusions
         pre_filter_count = len(uni)
         if all_exclusions:
             uni = uni[~uni['Symbol'].isin(all_exclusions)].copy()
-            append_log(f"Excluded {pre_filter_count - len(uni)} symbols using manual+monthly exclusion lists (remote + fallback)")
-        # ---------------------------------------
+            append_log(f"Excluded {pre_filter_count - len(uni)} symbols using manual+monthly exclusion lists (remote)")
+        
+        # ---- Exclusion pool loading complete ----
         
         if max_symbols and max_symbols > 0:
             uni = uni.head(max_symbols).copy()
