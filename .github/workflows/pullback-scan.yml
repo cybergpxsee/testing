@@ -45,11 +45,11 @@ jobs:
       PYTHONUNBUFFERED: '1'
       HERMES_SCAN_MAX_SYMBOLS: ${{ github.event.inputs.max_symbols || '' }}
       HERMES_SCAN_STAGE1_PERIOD: ${{ github.event.inputs.stage1_period || '1mo' }}
-      HERMES_SCAN_STAGE1_BATCH: ${{ github.event.inputs.stage1_batch || '120' }}
-      HERMES_SCAN_STAGE2_BATCH: ${{ github.event.inputs.stage2_batch || '100' }}
-      HERMES_SCAN_UNIVERSE_SHARDS: ${{ github.event.inputs.universe_shards || '12' }}
-      HERMES_SCAN_WORKER_CONCURRENCY: ${{ github.event.inputs.worker_concurrency || '3' }}
-      HERMES_SCAN_WORKER_STAGGER: ${{ github.event.inputs.worker_stagger || '1' }}
+      HERMES_SCAN_STAGE1_BATCH: ${{ github.event.inputs.stage1_batch || '50' }}
+      HERMES_SCAN_STAGE2_BATCH: ${{ github.event.inputs.stage2_batch || '50' }}
+      HERMES_SCAN_UNIVERSE_SHARDS: ${{ github.event.inputs.universe_shards || '8' }}
+      HERMES_SCAN_WORKER_CONCURRENCY: ${{ github.event.inputs.worker_concurrency || '2' }}
+      HERMES_SCAN_WORKER_STAGGER: ${{ github.event.inputs.worker_stagger || '2' }}
       HERMES_SCAN_STAGE2_SHARDS_PER_WORKER: '1'
     steps:
       - name: Checkout
