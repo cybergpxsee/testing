@@ -30,6 +30,10 @@ from config import (
 from logging_utils import get_logger, log_info, log_warning, log_error, log_debug
 from cache_utils import get_cache, BarCache
 
+# Import yahoo_fetcher for robust downloading
+from yahoo_fetcher import download_bars as yf_download_bars
+from cache_utils import get_cache, BarCache
+
 # Forward declarations for functions used by aggregate_shard_results (to avoid circular imports)
 # These are defined later in this module
 # clone_row_for_liquidity_band, render_markdown_report
@@ -201,19 +205,13 @@ def split_into_shards(seq, shard_count):
 
 
 def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
-    frames = []
-    misses = set()
-    
-    # Initialize cache
     from cache_utils import get_cache
     cache = get_cache()
     
-    # 1. Try to get from cache first
     cached_frames = {}
     to_download = []
     cache_hits = 0
     cache_misses = 0
-    
     for sym in symbols:
         cached = cache.get(sym, period)
         if cached is not None:
@@ -222,124 +220,28 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
         else:
             to_download.append(sym)
             cache_misses += 1
-    
     if cache_hits > 0:
         log_info(f"Cache: hits={cache_hits} misses={cache_misses} for {len(symbols)} symbols period={period}")
     
-    total_batches = max(1, math.ceil(len(to_download) / batch)) if to_download else 0
-    for group_idx, group in enumerate(chunked(to_download, batch), start=1):
-        batch_start = time.time()
-        log_info(
-            f"{phase}_BATCH_START period={period} batch={group_idx}/{total_batches} size={len(group)} accumulated_ok={len(frames) + len(cached_frames)} accumulated_miss={len(misses)}"
+    if to_download:
+        # 使用 yahoo_fetcher 的稳健下载
+        new_frames, misses = yf_download_bars(
+            symbols=to_download,
+            period=period,
+            stderr_path=stderr_path,
+            batch=batch,
+            phase=phase,
+            interval='1d',
+            prefer_backend='curl_cffi'
         )
-        tickers = ' '.join(group)
-        time.sleep(0.35 + random.uniform(0.0, 0.55))
-        data = None
-        last_error = None
-        for attempt in range(1, 4):
-            try:
-                data = run_with_hard_timeout(
-                    45,
-                    lambda: yf.download(
-                        tickers=tickers,
-                        period=period,
-                        interval='1d',
-                        auto_adjust=False,
-                        group_by='ticker',
-                        progress=False,
-                        threads=False,
-                        prepost=False,
-                        timeout=30,
-                    )
-                )
-                if data is not None and len(data) != 0:
-                    break
-                last_error = RuntimeError('empty download result')
-            except Exception as e:
-                last_error = e
-            wait_s = 0.8 * attempt + random.uniform(0.6, 1.8)
-            log_info(
-                f"{phase}_RETRY period={period} batch={group_idx}/{total_batches} attempt={attempt} size={len(group)} wait={wait_s:.2f}s error={last_error}"
-            )
-            if attempt < 3:
-                time.sleep(wait_s)
-        if data is None or len(data) == 0:
-            log_info(
-                f"{phase}_ERROR period={period} batch={group_idx}/{total_batches} sample={group[:5]} error={last_error}"
-            )
-            misses.update(group)
-            continue
-        before_frames = len(frames)
-        before_misses = len(misses)
-        if isinstance(data.columns, pd.MultiIndex):
-            if data.columns.nlevels == 2:
-                if data.columns[0][0] in ["Adj Close", "Close", "High", "Low", "Open", "Volume"]:
-                    # single ticker shape from yfinance sometimes
-                    if len(group) == 1:
-                        sym = group[0]
-                        df = data.copy()
-                        df.columns = [c[0] for c in df.columns]
-                        df = df.reset_index().rename(columns={df.index.name or 'Date': 'Date'})
-                        frames.append((sym, df))
-                    else:
-                        # unexpected; try extract by top-level names if possible
-                        for sym in group:
-                            try:
-                                sdf = data[sym].reset_index()
-                                frames.append((sym, sdf))
-                            except Exception:
-                                misses.add(sym)
-                    continue
-                for sym in group:
-                    try:
-                        sdf = data[sym].copy().reset_index()
-                        if len(sdf.dropna(how='all')) == 0:
-                            misses.add(sym)
-                        else:
-                            frames.append((sym, sdf))
-                    except Exception:
-                        misses.add(sym)
-            else:
-                misses.update(group)
-        else:
-            if len(group) == 1:
-                sdf = data.reset_index()
-                frames.append((group[0], sdf))
-            else:
-                misses.update(group)
-        batch_ok = len(frames) - before_frames
-        batch_miss = len(misses) - before_misses
-        elapsed = time.time() - batch_start
-        log_info(
-            f"{phase}_BATCH_DONE period={period} batch={group_idx}/{total_batches} size={len(group)} ok={batch_ok} miss={batch_miss} cumulative_ok={len(frames)} cumulative_miss={len(misses)} elapsed={elapsed:.2f}s"
-        )
-        time.sleep(0.15)
+        # 缓存新下载的数据
+        for sym, df in new_frames.items():
+            cache.set(sym, period, df)
+        cached_frames.update(new_frames)
+    else:
+        misses = set()
     
-    # Merge cached frames with downloaded frames
-    all_frames = cached_frames.copy()
-    for sym, df in frames:
-        all_frames[sym] = df
-    
-    # Save downloaded frames to cache
-    for sym, df in frames:
-        cache.set(sym, period, df)
-    
-    out = {}
-    for sym, df in all_frames.items():
-        cols = {c.lower(): c for c in df.columns}
-        needed = [cols.get('date'), cols.get('open'), cols.get('high'), cols.get('low'), cols.get('close'), cols.get('volume')]
-        if any(c is None for c in needed):
-            misses.add(sym)
-            continue
-        sdf = df[[cols['date'], cols['open'], cols['high'], cols['low'], cols['close'], cols['volume']]].copy()
-        sdf.columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
-        sdf = sdf.dropna(subset=['Date']).sort_values('Date')
-        if len(sdf) == 0 or sdf[['Open','High','Low','Close']].dropna(how='all').empty:
-            misses.add(sym)
-            continue
-        sdf['Date'] = pd.to_datetime(sdf['Date']).dt.tz_localize(None)
-        out[sym] = sdf.reset_index(drop=True)
-    return out, misses
+    return cached_frames, misses
 
 
 def local_extrema(df: pd.DataFrame, kind: str, lookback=90, window=SWING_WINDOW):
