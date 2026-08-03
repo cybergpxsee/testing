@@ -1,4 +1,4 @@
-name: pullback-scan
+name: us-head-shoulder-bottom-scan
 
 on:
   workflow_dispatch:
@@ -19,10 +19,6 @@ on:
         description: 'Stage2 batch size'
         required: false
         default: '100'
-      stage2_period:
-        description: 'Stage2 deep-history lookback (e.g., 1y for 52-week high/low)'
-        required: false
-        default: '1y'
       universe_shards:
         description: 'Shard count before workers start'
         required: false
@@ -35,7 +31,6 @@ on:
         description: 'Seconds to stagger worker launches'
         required: false
         default: '0.5'
-  
 
 jobs:
   scan:
@@ -84,41 +79,27 @@ jobs:
       # === 已移除 Ensure local universe cache exists 步驟（現由共享倉庫提供） ===
 
       - name: Run scan
-        env:
-          HERMES_SCAN_STAGE2_PERIOD: ${{ github.event.inputs.stage2_period || '1y' }}
         run: bash scripts/run_scan.sh
 
       - name: Upload output artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pullback-scan-${{ github.run_id }}
+          name: us-head-shoulder-bottom-scan-${{ github.run_id }}
           path: output/
           if-no-files-found: error
 
       - name: Append latest markdown to job summary
         shell: bash
         run: |
-          latest_md=$(find output -name 'pullback_scan.md' | sort | tail -n 1)
+          latest_md=$(find output -name 'head_shoulder_scan.md' | sort | tail -n 1)
           echo '## Latest report' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           cat "$latest_md" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Generate Discord embed payload
-        run: |
-          latest_json=$(find output -name 'pullback_scan.json' | sort | tail -n 1)
-          python scripts/render_discord.py "$latest_json" output/
-
-      - name: Upload Discord payload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: discord-payload-${{ github.run_id }}
-          path: output/discord_embed_*.json
-          if-no-files-found: warn
-
-      - name: Send Discord embed
+      - name: Send latest markdown to Discord webhook
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         if: success() && env.DISCORD_WEBHOOK_URL != ''
         run: |
-          payload=$(find output -name 'discord_embed_*.json' | sort | tail -n 1)
-          python scripts/post_to_discord.py "$payload"
+          latest_md=$(find output -name 'head_shoulder_scan.md' | sort | tail -n 1)
+          python scripts/post_to_discord.py "$latest_md"
