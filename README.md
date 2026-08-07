@@ -1,125 +1,69 @@
-# us-head-shoulder-bottom-scanner
+# pullback-scan-github-template
 
-這個 repo 名稱沿用舊包裝，方便你直接覆蓋原本的 **us head shoulder** 版本；但目前最新版核心邏輯已同步為：
+這是把你目前的「回調買上漲的」掃描邏輯遷移到 **GitHub Actions** 自動執行的模板。
 
-**美股「雙頂 → 破底翻 → 回調買點」掃描模板**
+## 目前已內建的簡報設定
+## 最新策略同步狀態
 
-不是硬找 textbook 頭肩底，而是把交易邏輯拆成可維護的 4 段：
+- 已同步目前正式任務的掃描規則
+- 局部高低點判定使用 `window=3` 以降低雜訊
+- 近期趨勢線使用最近 `30` 根K，仍為硬條件
+- 長期趨勢線額外查看最近 `90` 根K；若同步突破/跌破，排序加 `+5` 分
+- 簡報全文輸出為**繁體中文**
+- 新版簡報已改成 **圖標美化 + 固定寬度對齊**，方便 Discord / 手機端閱讀
+- 開頭固定列出：`數據來源`、`數據日期`
+- 先按 **回調日過去 20 個交易日平均交易額** 分成兩組：
+  - `過去20日平均交易額：5000萬美元以上`
+  - `過去20日平均交易額：2000萬-5000萬美元`
+- 每一組內再分為：`適合做多前10名`、`適合做空前10名`
+- 表格固定只顯示：`股票代碼 | 做空或做多 | 回調日`
+- `回調日` 不再壓縮成單一最新日期；會優先顯示每檔最近 **3 個 individually 合格窗口日**，格式如：`06-08 / 06-17 / 06-22`
+- 每個窗口只取 1 個代表日：
+  - 做多：窗口內**最低價**那天
+  - 做空：窗口內**最高價**那天
+- **每一個最終顯示出來的回調日，都必須 individually 通過雙重檢查**：
+  - 方向過濾：
+    - 做多：該代表日相對 5 個交易日前，需至少高出 1%
+    - 做空：該代表日相對 5 個交易日前，需至少低出 1%
+  - 流動性過濾：
+    - 該代表日回看過去 20 個交易日平均交易額必須 **>= 2000 萬美元**
+- 不合格的代表日會直接從顯示列表剔除，不是整檔股票一律刪掉
+- 回調/回抽質量採加分制：碰平台位加分、碰籌碼密集區加分，**同時碰平台位 + 籌碼密集區更佳**
+- 同一檔股票如果不同代表日落在不同流動性分組，會按分組拆開顯示
+- 雙底／雙頂母結構有效性：兩腳之間**至少相隔 20 個交易日**；若兩腳之間**相隔 60 個交易日或以上**，分數會額外加分
+- 雙底額外限制：兩個底點之間**不能再出現更低的谷底**，否則該雙底視為失效
+- 雙頂額外限制：兩個頂點之間**不能再出現更高的峰頂**，否則該雙頂視為失效
+- 簡報末尾固定追加：
+  - `風險提示：這是AI掃描出的參考買賣點，不涉及投資建議，做多或做空都有風險`
 
-1. 雙頂偵測
-2. 破底翻偵測
-3. 近期下降趨勢線突破確認
-4. 黃金回撤回調買點偵測
-
-同時保留你之前成熟的工程骨架：
-- 每月自動更新美股股票池（4 worker：prepare → update-shards → aggregate）
-- 預先排除低流動性 / Yahoo 易報錯 / 疑似退市股票
-- 主掃描前先套用 `config/exclude_symbols.txt` + `monthly_excluded_symbols.json`
-- Stage1 流動性預篩 → Stage2 深掃
-- GitHub Actions artifact + Discord webhook 推送
-- 簡報分兩個流動性板塊：
-  - 過去20日平均交易額：5000萬美元以上
-  - 過去20日平均交易額：2000萬-5000萬美元
-
-## 掃描核心定義
-
-### Stage 1：先找嚴格雙頂 / 雙底母結構
-- 先有兩個明顯雙頂（做多）或雙底（做空）
-- 兩頂 / 兩底相隔至少 **20 個交易日**
-- 雙頂兩頂價格差 **2% 以內**；雙底兩底價格差 **2% 以內**
-- 若兩頂 / 兩底相隔 **60 個交易日以上**，作加分項
-- **雙頂之間不可再出現高過兩個頂的價格**；否則不算雙頂
-- **雙底之間不可再出現低過兩個底的價格**；否則不算雙底
-- **第二個頂之後若曾跌破中間谷底，整個雙頂結構直接失效**
-- **第二個底之後若曾升破中間峰頂，整個雙底結構直接失效**
-
-### Stage 2：再找回調買點
-- 母結構未失效前，不追第一腳
-- 需先確認打破近期下降趨勢線（做多）或跌破近期上升趨勢線（做空）
-- 之後等待價格回踩上升段的 **0.5~0.618** 黃金回撤區
-- 若跌穿 **0.618**，但 **5 日內收回 0.618 上方**，也算合格
-- 回調位左方優先有 **籌碼密集區**；沒有的話，也至少要有平台區 / 前高 / 支撐線其一
-- 越多共振，分數越高；其中 **籌碼密集區權重最高**
-- 到達回調區後，若日線重新轉強 / 轉弱，或當日 **30 分鐘圖** 出現反轉結構，也視作有效確認；排序改為**先看回調日，再看 30m**
-- 若做多主路徑未形成標準「破底翻→突破確認」，會額外補一條對稱 fallback：**雙頂後先走出一段急跌，再回踩主升段 0.5-0.618 後重新轉強**，標記為 `雙頂→右側回調買點`
-- 做空則保留原本 fallback：**雙底後先走出一段急升，再回抽大跌段 0.5-0.618 後重新轉弱**，標記為 `雙底→右肩回調賣點`
-
-## 榜單顯示
-
-- 總標題改為：`美股右肩打頂底`
-- 榜單同時保留：
-  - `回調買`：`代碼 / 回調日 / 30M反應`
-  - `回調賣`：`代碼 / 回調日 / 30M反應`
-- 顯示順序改為：**先兩個回調買榜，再兩個回調賣榜**
-- `回調日` 若同一標的近期有多個候選窗口，**最多只顯示最近兩次**
-- **不再顯示**：止損、目標1、目標2
-- `30M反應` 欄位只顯示：
-  - `有`
-  - `無`
-
-## 風控與目標
-
-### 止損優先順序
-1. **籌碼密集區下沿下方**
-2. 平台 / 前高支撐下方
-3. 若都沒有，退回 **5% 止損**
-
-### 目標價
-- **目標1**：雙頂壓力區
-- **目標2**：1.618 趨勢延伸位
-
-## 目前內建規則
-- 局部高低點判定使用 `window=3`
-- Stage1 正式流動性規則：**過去20個交易日平均成交額 >= 2000萬美元**
-- 月更預排除池規則：
-  - **過去30個交易日平均成交額 < 1500萬美元**
-  - Yahoo 對不到 / 疑似退市 / 未上市代號
-- 近期下降趨勢線 lookback：`30`
-## 補充條件
-- 若雙頂 / 雙底相隔 **60 個交易日以上**，視作額外加分
-- 回調後的重新轉強 / 轉弱，不一定要日線收盤突破 / 跌破前一日高低；**同日 30m 反轉** 也可視作有效確認
-
-## 规则文档
-- `docs/double-top-breakdown-reclaim-spec.md`：完整規則文檔，適合給程序員/AI直接實作或繼續迭代
+## 安裝
 
 ## 目录结构
-- `us_pattern_scan.py`：主扫描程序（已同步支援回調買 / 回調賣，且 30m 反應為 long / short 對稱邏輯）
+
+- `us_pattern_scan.py`：主扫描程序
 - `scripts/run_scan.sh`：运行入口（先切 universe、多 worker 並發；每個 worker 自己做 stage1 + stage2）
 - `scripts/render_report.py`：把 JSON 渲染成 Markdown 简报
-- `scripts/update_symbol_universe.py`：每月更新美股股票池與預先排除清單
-- `.github/workflows/pullback-scan.yml`：GitHub Actions 掃描任務
-- `.github/workflows/update-universe-cache.yml`：每月更新股票池與預排除清單
-- `data/universe/`：本地股票池快取與月更排除池
-- `config/exclude_symbols.txt`：手動黑名單
-- `output/`：每次运行产物目录
+- `scripts/update_symbol_universe.py`：每月更新美股股票池與預先排除清單（支援 `prepare / shard / aggregate`）
+- `.github/workflows/pullback-scan.yml`：GitHub Actions 扫描任务
+- `.github/workflows/update-universe-cache.yml`：每月更新美股股票池與預先排除清單（prepare → matrix shards → aggregate）
+- `data/universe/`：本地股票池快取（`nasdaqlisted.txt`、`otherlisted.txt`、`us_symbols.csv`、`manifest.json`、`monthly_excluded_symbols.json/csv/txt`、`yahoo_bad_symbols.txt`）
+- `output/`：每次运行的产物目录（本地运行时生成；不会 git commit 到仓库）
 
 ## 本地运行
 
-先安装依赖：
-
 ```bash
 python -m pip install -r requirements.txt
-```
-
-先更新一次股票池與月更排除池：
-
-```bash
-python scripts/update_symbol_universe.py --shard-count 4
-```
-
-Smoke test：
-
-```bash
 HERMES_SCAN_MAX_SYMBOLS=200 bash scripts/run_scan.sh
 ```
 
 全量运行：
 
 ```bash
+python -m pip install -r requirements.txt
 bash scripts/run_scan.sh
 ```
 
-## 可調參數
+可調參數（multi-worker 架構）：
 
 ```bash
 HERMES_SCAN_UNIVERSE_SHARDS=18
@@ -131,30 +75,96 @@ HERMES_SCAN_STAGE2_BATCH=100
 HERMES_SCAN_WORKER_STAGGER=0.5
 ```
 
-## 股票池 / 預排除池設計
+## 股票代号缓存设计
 
-主掃描會優先讀取：
+现在扫描任务会**优先读取本地缓存**：
+
+- `data/universe/nasdaqlisted.txt`
+- `data/universe/otherlisted.txt`
+- `data/universe/manifest.json`
+- `data/universe/yahoo_bad_symbols.txt`
+
+只有当本地缓存不存在时，才会临时回退到在线抓取 Nasdaq Trader。
+
+这样做的好处：
+- 平时扫描少一次联网抓股票代号
+- 运行更稳定
+- 更容易排查问题
+- 股票池来源固定，结果更可复现
+
+### Yahoo-friendly universe filter（更嚴格）
+
+主掃描在載入本地股票池後，會先套用：
+
+- `config/exclude_symbols.txt` 手動黑名單
+- `data/universe/monthly_excluded_symbols.json` 月更低流動性 / 疑似退市未上市排除池
+
+然後再做一層更嚴格的 Yahoo-friendly 過濾，進一步排除：
+
+- warrant / warrants
+- right / rights
+- unit / units
+- preferred / preferred stock / trust preferred
+- depositary / depository
+- ETN / NextShares / notes / bonds
+- `-V`、`-WI`、`-WS`、`-WD`、`-U`、`-R`、`-RT`、`-P` 等 Yahoo 常見高風險特殊後綴
+- 少量已知常 timeout / 無數據 / quote not found 的 bad symbols（由 `data/universe/yahoo_bad_symbols.txt` 維護）
+
+另外，現在 workflow / 本地腳本已改成：
+- **universe 先切 shard**
+- **多 worker 分散 stage1**
+- **每個 worker 自己深掃**
+- **worker 之間有 stagger + 下載前 sleep/retry/backoff**
+
+## 本地先更新一次股票池與月更排除池
+
+```bash
+python scripts/update_symbol_universe.py
+```
+
+如果你想本地模擬 GitHub Actions 的 matrix 月更流程，可分三段跑：
+
+```bash
+python scripts/update_symbol_universe.py --mode prepare --workspace-dir .tmp/universe_update --shard-count 4
+python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 1
+python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 2
+python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 3
+python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 4
+python scripts/update_symbol_universe.py --mode aggregate --workspace-dir .tmp/universe_update
+```
+
+如果只想檢查 workflow / commit 流程，不想在 25 天內重複重跑完整月更，可用：
+
+```bash
+python scripts/update_symbol_universe.py --skip-if-fresh-days 25
+```
+
+如需無視 freshness guard 強制全量重建：
+
+```bash
+python scripts/update_symbol_universe.py --force-refresh
+```
+
+跑完後會生成：
 - `data/universe/nasdaqlisted.txt`
 - `data/universe/otherlisted.txt`
 - `data/universe/us_symbols.csv`
+- `data/universe/manifest.json`
 - `data/universe/monthly_excluded_symbols.json`
-- `config/exclude_symbols.txt`
+- `data/universe/monthly_excluded_symbols.csv`
+- `data/universe/monthly_excluded_symbols.txt`
+- `config/exclude_symbols.txt`（若原本不存在會自動建立）
 
-然後先做這些事：
-1. 載入 `us_symbols.csv`
-2. 套用手動黑名單 `config/exclude_symbols.txt`
-3. 套用月更生成排除池 `monthly_excluded_symbols.json`
-4. 才開始 shard + Stage1 流動性篩選
+月更排除規則：
+- 過去 **30 天平均成交額 < 1500 萬美元**
+- Yahoo 對不到 / 可能已退市 / 未上市的股票
 
-這樣可以先排除一大批：
-- 小流動性股票
-- Yahoo 常報錯 / 無數據股票
-- 疑似退市 / 未上市代號
+`data/universe/yahoo_bad_symbols.txt` 不會被月更腳本覆蓋，適合你手動維護 Yahoo 常出問題的 symbol blacklist。
 
-執行時會印出類似：
+然后再跑扫描：
 
-```text
-Prepared universe: 1234 symbols (pre-filter 8765, manual excludes 10, generated excludes 3121)
+```bash
+HERMES_SCAN_MAX_SYMBOLS=200 bash scripts/run_scan.sh
 ```
 
 ## GitHub Actions 用法
@@ -162,32 +172,68 @@ Prepared universe: 1234 symbols (pre-filter 8765, manual excludes 10, generated 
 ### 手动试跑
 1. 把整个仓库 push 到 GitHub
 2. 打开仓库 `Actions`
-3. 选择 `us-head-shoulder-bottom-scan`
+3. 选择 `pullback-scan`
 4. 点击 `Run workflow`
-5. 默认全量扫描；只想 smoke test 可填 `max_symbols=200`
+5. 这版默认就是**全量扫描**（`max_symbols` 留空）
+6. 如果只想先做 smoke test，可手动填 `max_symbols=200`
+7. 如需調快/調穩，可覆蓋 `universe_shards`、`worker_concurrency`、`stage1_batch`、`stage2_batch`
 
 ### 定时执行
-掃描 workflow 目前保留工作日定時執行；月更股票池 workflow 目前保留每月更新一次，並改成 4 worker 的 prepare → update-shards → aggregate。
+扫描工作流当前是：
+
+```yaml
+schedule:
+  - cron: '0 9 * * 1-5'
+```
+
+这是 **UTC 09:00，周一到周五**。
+如要换时间，改这个 cron 即可。
+
+股票代号缓存更新工作流当前是：
+
+```yaml
+schedule:
+  - cron: '0 2 1 * *'
+```
+
+這是 **每月 1 號 UTC 02:00** 自動更新一次 `data/universe/` 與 `config/exclude_symbols.txt`，並自動 commit 回倉庫。workflow 現在拆成 **prepare → matrix shards → aggregate**：先建立 universe / shard 清單，再並行下載每個 shard 的 Yahoo 資料，最後聚合結果並推回倉庫。push 前仍會先 `fetch + rebase` 再推送，以降低 remote branch 先更新造成的 non-fast-forward 失敗。
+
+另外，這個 updater workflow 現在會在 cache/manifest 仍屬新鮮（25 天內）時自動跳過完整重建；如果你是手動點 `Run workflow` 想強制全量重跑，可把 `force_refresh` 勾成 `true`。你也可以在手動執行時調整 `shard_count` 與 `max_parallel`；一般建議從 `4 / 4` 或 `6 / 3` 開始。
 
 ## 产物
+
 每次运行会产出：
-- `head_shoulder_scan.md`
-- `head_shoulder_scan.json`
-- `head_shoulder_scan.stderr.log`
+- `pullback_scan.md`
+- `pullback_scan.json`
+- `pullback_scan.stderr.log`
 - `liquid_symbols.json`
 - `artifacts/` worker 目录与分片 JSON
 
-> 檔名先沿用舊版 head_shoulder 命名，方便你無痛替換既有 workflow / webhook / 打包流程。
+GitHub Actions 会把整个 `output/` 上传成 artifact，供你下载；但 `output/` 不会被 git commit 到仓库。
 
-## Discord 推送
-如果 GitHub Actions secret 已配置：
+## 推荐上线顺序
+
+1. 先本地/Actions 手动跑 `max_symbols=200`
+2. 看 artifact 里的 `stderr.log` 是否有正常进度
+3. 看 `pullback_scan.md` 格式是否符合你要的简报样式
+4. 看 `liquid_symbols.json` / `pullback_scan.json` 裡的 `run_config` 是否符合預期
+5. 确认 `data/universe/` 已存在缓存文件
+6. 再切换到全量运行
+
+## 自动发送到 Discord 群组频道
+你已经在 GitHub Actions secret 里配置了：
+
 - `DISCORD_WEBHOOK_URL`
 
-workflow 跑完後會自動把最新 `head_shoulder_scan.md` 發到對應 Discord webhook 頻道。
+本模板已內置發送步驟：workflow 跑完後，會自動把最新的 `pullback_scan.md` 發到該 webhook 對應的 Discord 頻道。並且 workflow 最後一步已改成以 `env.DISCORD_WEBHOOK_URL` 做檢查，避免直接在 step `if:` 內判斷 `secrets.*`。
 
-## 当前交付说明
-這版是 **在最新 us head shoulder 包上同步的新規則版本**：
-- 已保留原本月更股票池 + 預篩工程流
-- 已改成美股版 **雙頂→破底翻→回調買點**
-- 已同步報表標題、欄位、README 與規格文檔
-- 已同步為 long / short 雙榜板塊（回調買 + 回調賣）
+注意：
+- Discord webhook 只能发到**频道**，不能发私信。
+- 单条消息有 2000 字符限制；当前这版简报通常不会超。模板里仍做了截断保护。
+- 如果 workflow 成功但 Discord 没收到，先检查 webhook 是否仍有效、secret 名称是否完全一致。
+
+## 如果你还想扩展
+如果你要，我可以下一步继续帮你补：
+1. **GitHub 自动推送到 Telegram**
+2. **每次运行后自动 commit 最新 Markdown 到仓库**
+3. **Discord 发送失败时自动重试 / @某个角色**
