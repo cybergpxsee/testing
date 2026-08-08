@@ -1,239 +1,216 @@
-# pullback-scan-github-template
+# momentum-rank-scanner
 
-這是把你目前的「回調買上漲的」掃描邏輯遷移到 **GitHub Actions** 自動執行的模板。
+美股動量排名週報掃描器 — 基於相對 SPY 的超額報酬百分位排名 (20R/60R/120R/Rank)，每週六自動產出三類別簡報並推送至 Discord。
 
-## 目前已內建的簡報設定
-## 最新策略同步狀態
+## 核心邏輯
 
-- 已同步目前正式任務的掃描規則
-- 局部高低點判定使用 `window=3` 以降低雜訊
-- 近期趨勢線使用最近 `30` 根K，仍為硬條件
-- 長期趨勢線額外查看最近 `90` 根K；若同步突破/跌破，排序加 `+5` 分
-- 簡報全文輸出為**繁體中文**
-- 新版簡報已改成 **圖標美化 + 固定寬度對齊**，方便 Discord / 手機端閱讀
-- 開頭固定列出：`數據來源`、`數據日期`
-- 先按 **回調日過去 20 個交易日平均交易額** 分成兩組：
-  - `過去20日平均交易額：5000萬美元以上`
-  - `過去20日平均交易額：2000萬-5000萬美元`
-- 每一組內再分為：`適合做多前10名`、`適合做空前10名`
-- 表格固定只顯示：`股票代碼 | 做空或做多 | 回調日`
-- `回調日` 不再壓縮成單一最新日期；會優先顯示每檔最近 **3 個 individually 合格窗口日**，格式如：`06-08 / 06-17 / 06-22`
-- 每個窗口只取 1 個代表日：
-  - 做多：窗口內**最低價**那天
-  - 做空：窗口內**最高價**那天
-- **每一個最終顯示出來的回調日，都必須 individually 通過雙重檢查**：
-  - 方向過濾：
-    - 做多：該代表日相對 5 個交易日前，需至少高出 1%
-    - 做空：該代表日相對 5 個交易日前，需至少低出 1%
-  - 流動性過濾：
-    - 該代表日回看過去 20 個交易日平均交易額必須 **>= 2000 萬美元**
-- 不合格的代表日會直接從顯示列表剔除，不是整檔股票一律刪掉
-- 回調/回抽質量採加分制：碰平台位加分、碰籌碼密集區加分，**同時碰平台位 + 籌碼密集區更佳**
-- 同一檔股票如果不同代表日落在不同流動性分組，會按分組拆開顯示
-- 雙底／雙頂母結構有效性：兩腳之間**至少相隔 20 個交易日**；若兩腳之間**相隔 60 個交易日或以上**，分數會額外加分
-- 雙底額外限制：兩個底點之間**不能再出現更低的谷底**，否則該雙底視為失效
-- 雙頂額外限制：兩個頂點之間**不能再出現更高的峰頂**，否則該雙頂視為失效
-- 簡報末尾固定追加：
-  - `風險提示：這是AI掃描出的參考買賣點，不涉及投資建議，做多或做空都有風險`
+### 動量排名計算
+- **20R/60R/120R**：標的在 20/60/120 天窗口的報酬率減去 SPY 同期報酬率，再在全市場做百分位排名 (1-99，越大越強)
+- **Rank 綜合排名**：`Rank = 0.2 × 20R + 0.4 × 60R + 0.4 × 120R`
+- 數據來源：Nasdaq Trader 股票池 + Yahoo Finance (yfinance) 日線 OHLCV
+- 流動性門檻：回調日過去 20 個交易日平均交易額 ≥ $20M
 
-## 安裝
+### 三類別篩選條件
+| 類別 | 條件 | 圖示 | 含義 |
+|------|------|------|------|
+| **類別 1** | 20R∈[75,89] **且** 60R∈[75,89] **且** 120R<80 | 🟡 | 短中期動量強但長期動量落後 — 可能是反轉/追趨機會 |
+| **類別 2** | 20R≥90 **且** 60R≥90 **且** 120R<80 | 🟢 | 短中期極強但長期落後 — 動量加速但長期基礎較弱 |
+| **類別 3** | Rank ≥ 90 | 🔵 | 綜合動量極強 — 全時段表現優異 |
 
-## 目录结构
+### 輸出格式
+- **Markdown 簡報**：含標題、掃描資訊、三類別表格（代碼 | 20R | 60R | 120R | Rank，按 Rank 降序）
+- **Discord Embed**：三個 field 分別對應三類別，每類顯示前 20 檔
+- **JSON 完整資料**：含完整排名、分類結果、掃描統計
 
-- `us_pattern_scan.py`：主扫描程序
-- `scripts/run_scan.sh`：运行入口（先切 universe、多 worker 並發；每個 worker 自己做 stage1 + stage2）
-- `scripts/render_report.py`：把 JSON 渲染成 Markdown 简报
-- `scripts/update_symbol_universe.py`：每月更新美股股票池與預先排除清單（支援 `prepare / shard / aggregate`）
-- `.github/workflows/pullback-scan.yml`：GitHub Actions 扫描任务
-- `.github/workflows/update-universe-cache.yml`：每月更新美股股票池與預先排除清單（prepare → matrix shards → aggregate）
-- `data/universe/`：本地股票池快取（`nasdaqlisted.txt`、`otherlisted.txt`、`us_symbols.csv`、`manifest.json`、`monthly_excluded_symbols.json/csv/txt`、`yahoo_bad_symbols.txt`）
-- `output/`：每次运行的产物目录（本地运行时生成；不会 git commit 到仓库）
+## 目錄結構
 
-## 本地运行
+```
+momentum-rank-scanner/
+├── .github/workflows/
+│   └── momentum-rank-scan.yml      # GitHub Actions 工作流 (每週六 06:00 UTC)
+├── config/
+│   └── exclude_symbols.txt         # 手動排除代碼清單
+├── scripts/
+│   ├── momentum_rank_scanner.py    # 核心掃描邏輯
+│   ├── render_momentum_report.py   # 報告渲染器 (Markdown + Discord JSON)
+│   ├── run_momentum_scan.sh        # 執行入口腳本
+│   ├── post_to_discord.py          # Discord Webhook 發送
+│   └── render_discord.py           # (舊版相容)
+├── requirements.txt                # yfinance, pandas, numpy
+└── README.md
+```
 
+## 本地運行
+
+### 安裝依賴
 ```bash
 python -m pip install -r requirements.txt
-HERMES_SCAN_MAX_SYMBOLS=200 bash scripts/run_scan.sh
 ```
 
-全量运行：
-
+### 快速測試 (200 檔標的)
 ```bash
-python -m pip install -r requirements.txt
-bash scripts/run_scan.sh
+MOMENTUM_SCAN_MAX_SYMBOLS=200 bash scripts/run_momentum_scan.sh
 ```
 
-可調參數（multi-worker 架構）：
-
+### 完整掃描
 ```bash
-HERMES_SCAN_UNIVERSE_SHARDS=18
-HERMES_SCAN_WORKER_CONCURRENCY=6
-HERMES_SCAN_STAGE2_SHARDS_PER_WORKER=1
-HERMES_SCAN_STAGE1_PERIOD=1mo
-HERMES_SCAN_STAGE1_BATCH=120
-HERMES_SCAN_STAGE2_BATCH=100
-HERMES_SCAN_WORKER_STAGGER=0.5
+bash scripts/run_momentum_scan.sh
 ```
 
-## 股票代号缓存设计
-
-现在扫描任务会**优先读取本地缓存**：
-
-- `data/universe/nasdaqlisted.txt`
-- `data/universe/otherlisted.txt`
-- `data/universe/manifest.json`
-- `data/universe/yahoo_bad_symbols.txt`
-
-只有当本地缓存不存在时，才会临时回退到在线抓取 Nasdaq Trader。
-
-这样做的好处：
-- 平时扫描少一次联网抓股票代号
-- 运行更稳定
-- 更容易排查问题
-- 股票池来源固定，结果更可复现
-
-### Yahoo-friendly universe filter（更嚴格）
-
-主掃描在載入本地股票池後，會先套用：
-
-- `config/exclude_symbols.txt` 手動黑名單
-- `data/universe/monthly_excluded_symbols.json` 月更低流動性 / 疑似退市未上市排除池
-
-然後再做一層更嚴格的 Yahoo-friendly 過濾，進一步排除：
-
-- warrant / warrants
-- right / rights
-- unit / units
-- preferred / preferred stock / trust preferred
-- depositary / depository
-- ETN / NextShares / notes / bonds
-- `-V`、`-WI`、`-WS`、`-WD`、`-U`、`-R`、`-RT`、`-P` 等 Yahoo 常見高風險特殊後綴
-- 少量已知常 timeout / 無數據 / quote not found 的 bad symbols（由 `data/universe/yahoo_bad_symbols.txt` 維護）
-
-另外，現在 workflow / 本地腳本已改成：
-- **universe 先切 shard**
-- **多 worker 分散 stage1**
-- **每個 worker 自己深掃**
-- **worker 之間有 stagger + 下載前 sleep/retry/backoff**
-
-## 本地先更新一次股票池與月更排除池
-
+### 可調參數 (環境變數)
 ```bash
-python scripts/update_symbol_universe.py
+# 掃描參數
+MOMENTUM_SCAN_MAX_SYMBOLS=0          # 0 = 全量，>0 限制數量 (測試用)
+MOMENTUM_SCAN_STAGE1_PERIOD=1mo      # Stage1 流動性看回期
+MOMENTUM_SCAN_STAGE1_BATCH=120       # Stage1 下載批次大小
+MOMENTUM_SCAN_STAGE2_BATCH=100       # Stage2 下載批次大小
+MOMENTUM_SCAN_STAGE2_PERIOD=1y       # Stage2 深度數據看回期
+MOMENTUM_SCAN_SHARDS=4               # 並行分片數
+
+# 執行範例
+MOMENTUM_SCAN_MAX_SYMBOLS=200 \
+MOMENTUM_SCAN_STAGE1_BATCH=80 \
+MOMENTUM_SCAN_STAGE2_BATCH=80 \
+MOMENTUM_SCAN_SHARDS=4 \
+bash scripts/run_momentum_scan.sh
 ```
 
-如果你想本地模擬 GitHub Actions 的 matrix 月更流程，可分三段跑：
+### 輸出產物
+執行後會在 `output/<timestamp>/` 產生：
+```
+output/20260808T052320Z/
+├── artifacts/
+│   └── momentum_rank_output.json   # 完整 JSON (含錯誤時也會產出)
+├── momentum_rank_output.json       # 複製到最終目錄
+├── momentum_rank_report.md         # Markdown 簡報
+├── momentum_discord_embed.json     # Discord Embed payload
+└── momentum_scan.log               # 詳細執行日誌
+```
 
+## GitHub Actions 部署
+
+### 1. 推送到 GitHub
 ```bash
-python scripts/update_symbol_universe.py --mode prepare --workspace-dir .tmp/universe_update --shard-count 4
-python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 1
-python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 2
-python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 3
-python scripts/update_symbol_universe.py --mode shard --workspace-dir .tmp/universe_update --shard-index 4
-python scripts/update_symbol_universe.py --mode aggregate --workspace-dir .tmp/universe_update
+git init
+git add .
+git commit -m "Initial commit: momentum rank scanner"
+git remote add origin https://github.com/<your-org>/<your-repo>.git
+git push -u origin main
 ```
 
-如果只想檢查 workflow / commit 流程，不想在 25 天內重複重跑完整月更，可用：
+### 2. 設定 Secrets
+在 Repository → Settings → Secrets and variables → Actions 新增：
+- `DISCORD_WEBHOOK_URL`：Discord Webhook URL (用於發送週報)
+- (可選) `PAT_FOR_DATA_SHARE`：若使用私有共享倉庫存放 universe cache
 
-```bash
-python scripts/update_symbol_universe.py --skip-if-fresh-days 25
-```
+### 3. 啟用 Workflow
+- 進入 Actions 頁面，選擇 `momentum-rank-scan`，啟用工作流
+- 預設排程：**每週六 06:00 UTC** (台灣時間週六 14:00)
 
-如需無視 freshness guard 強制全量重建：
+### 4. 手動觸發測試
+1. Actions → `momentum-rank-scan` → `Run workflow`
+2. 可調整參數：
+   - `max_symbols`：留空 = 全量，填 `200` = 測試模式
+   - `stage1_period` / `stage2_period`：調整看回期
+   - `shards`：並行分片數 (預設 4)
+3. 點擊 `Run workflow`
 
-```bash
-python scripts/update_symbol_universe.py --force-refresh
-```
-
-跑完後會生成：
-- `data/universe/nasdaqlisted.txt`
-- `data/universe/otherlisted.txt`
-- `data/universe/us_symbols.csv`
-- `data/universe/manifest.json`
-- `data/universe/monthly_excluded_symbols.json`
-- `data/universe/monthly_excluded_symbols.csv`
-- `data/universe/monthly_excluded_symbols.txt`
-- `config/exclude_symbols.txt`（若原本不存在會自動建立）
-
-月更排除規則：
-- 過去 **30 天平均成交額 < 1500 萬美元**
-- Yahoo 對不到 / 可能已退市 / 未上市的股票
-
-`data/universe/yahoo_bad_symbols.txt` 不會被月更腳本覆蓋，適合你手動維護 Yahoo 常出問題的 symbol blacklist。
-
-然后再跑扫描：
-
-```bash
-HERMES_SCAN_MAX_SYMBOLS=200 bash scripts/run_scan.sh
-```
-
-## GitHub Actions 用法
-
-### 手动试跑
-1. 把整个仓库 push 到 GitHub
-2. 打开仓库 `Actions`
-3. 选择 `pullback-scan`
-4. 点击 `Run workflow`
-5. 这版默认就是**全量扫描**（`max_symbols` 留空）
-6. 如果只想先做 smoke test，可手动填 `max_symbols=200`
-7. 如需調快/調穩，可覆蓋 `universe_shards`、`worker_concurrency`、`stage1_batch`、`stage2_batch`
-
-### 定时执行
-扫描工作流当前是：
+## 排程設定
 
 ```yaml
+# .github/workflows/momentum-rank-scan.yml
 schedule:
-  - cron: '0 9 * * 1-5'
+  - cron: '0 6 * * 6'   # 每週六 06:00 UTC
 ```
 
-这是 **UTC 09:00，周一到周五**。
-如要换时间，改这个 cron 即可。
+如需修改時間，編輯 workflow 中的 `cron` 表達式。
 
-股票代号缓存更新工作流当前是：
+## 手動排除代碼
 
-```yaml
-schedule:
-  - cron: '0 2 1 * *'
+編輯 `config/exclude_symbols.txt`，每行一個代碼 (支援註解 `#`)：
+```text
+# 手動排除範例
+SYMBOL1
+SYMBOL2
 ```
 
-這是 **每月 1 號 UTC 02:00** 自動更新一次 `data/universe/` 與 `config/exclude_symbols.txt`，並自動 commit 回倉庫。workflow 現在拆成 **prepare → matrix shards → aggregate**：先建立 universe / shard 清單，再並行下載每個 shard 的 Yahoo 資料，最後聚合結果並推回倉庫。push 前仍會先 `fetch + rebase` 再推送，以降低 remote branch 先更新造成的 non-fast-forward 失敗。
+## Discord 簡報範例
 
-另外，這個 updater workflow 現在會在 cache/manifest 仍屬新鮮（25 天內）時自動跳過完整重建；如果你是手動點 `Run workflow` 想強制全量重跑，可把 `force_refresh` 勾成 `true`。你也可以在手動執行時調整 `shard_count` 與 `max_parallel`；一般建議從 `4 / 4` 或 `6 / 3` 開始。
+```
+📊 美股動量排名週報
+📅 掃描日期：2026-08-08
+🔢 掃描標的數：3245
+✅ 有效數據：2847
+📈 數據來源：Nasdaq Trader + Yahoo Finance (yfinance)
 
-## 产物
+🟡 類別 1：20R&60R在 75-89，但 120R < 80 （共 12 檔）
+| 代碼 | 20R | 60R | 120R | Rank |
+|------|-----|-----|------|------|
+| ELVN | 95  | 94  | 78   | 91.4 |
+| DUM  | 98  | 95  | 72   | 89.8 |
 
-每次运行会产出：
-- `pullback_scan.md`
-- `pullback_scan.json`
-- `pullback_scan.stderr.log`
-- `liquid_symbols.json`
-- `artifacts/` worker 目录与分片 JSON
+🟢 類別 2：20R&60R ≥ 90，但 120R < 80 （共 5 檔）
+| 代碼 | 20R | 60R | 120R | Rank |
+|------|-----|-----|------|------|
+| HPE  | 99  | 98  | 75   | 94.2 |
 
-GitHub Actions 会把整个 `output/` 上传成 artifact，供你下载；但 `output/` 不会被 git commit 到仓库。
+🔵 類別 3：總 Rank ≥ 90 （共 28 檔）
+| 代碼 | 20R | 60R | 120R | Rank |
+|------|-----|-----|------|------|
+| ELVN | 95  | 94  | 98   | 95.8 |
+| HPE  | 75  | 98  | 99   | 94.0 |
 
-## 推荐上线顺序
+⚠️ 風險提示：此為動量排名篩選結果，非買賣建議。排名基於相對 SPY 的超額報酬百分位，數值越大代表相對動量越強。請自行判斷風險。
+```
 
-1. 先本地/Actions 手动跑 `max_symbols=200`
-2. 看 artifact 里的 `stderr.log` 是否有正常进度
-3. 看 `pullback_scan.md` 格式是否符合你要的简报样式
-4. 看 `liquid_symbols.json` / `pullback_scan.json` 裡的 `run_config` 是否符合預期
-5. 确认 `data/universe/` 已存在缓存文件
-6. 再切换到全量运行
+## 錯誤處理與除錯
 
-## 自动发送到 Discord 群组频道
-你已经在 GitHub Actions secret 里配置了：
+### 常見問題
+1. **SPY data not available**：SPY 下載失敗，檢查 `momentum_scan.log` 中的 Stage 2 下載情況
+2. **Yahoo Finance 限流**：log 中出現 `YFRateLimitError`，可調大 batch 間隔或減小 batch size
+3. **無有效排名**：`valid_count=0`，通常是 Stage 1 流動性門檻過高或 Stage 2 數據長度不足
 
-- `DISCORD_WEBHOOK_URL`
+### 除錯步驟
+```bash
+# 1. 查看詳細日誌
+cat output/<timestamp>/momentum_scan.log
 
-本模板已內置發送步驟：workflow 跑完後，會自動把最新的 `pullback_scan.md` 發到該 webhook 對應的 Discord 頻道。並且 workflow 最後一步已改成以 `env.DISCORD_WEBHOOK_URL` 做檢查，避免直接在 step `if:` 內判斷 `secrets.*`。
+# 2. 檢查 JSON 輸出
+cat output/<timestamp>/momentum_rank_output.json
 
-注意：
-- Discord webhook 只能发到**频道**，不能发私信。
-- 单条消息有 2000 字符限制；当前这版简报通常不会超。模板里仍做了截断保护。
-- 如果 workflow 成功但 Discord 没收到，先检查 webhook 是否仍有效、secret 名称是否完全一致。
+# 3. 本地測試小量標的
+MOMENTUM_SCAN_MAX_SYMBOLS=50 MOMENTUM_SCAN_STAGE1_BATCH=20 MOMENTUM_SCAN_STAGE2_BATCH=20 bash scripts/run_momentum_scan.sh
+```
 
-## 如果你还想扩展
-如果你要，我可以下一步继续帮你补：
-1. **GitHub 自动推送到 Telegram**
-2. **每次运行后自动 commit 最新 Markdown 到仓库**
-3. **Discord 发送失败时自动重试 / @某个角色**
+## 進階：共享 Universe Cache (可選)
+
+為避免每次掃描都重新下載 Nasdaq Trader 股票池，可建立共享倉庫：
+
+1. 建立獨立 repo (如 `your-org/data-share`)
+2. 結構：
+   ```
+   data-share/
+   └── data/universe/
+       ├── nasdaqlisted.txt
+       ├── otherlisted.txt
+       ├── us_symbols.csv
+       ├── monthly_excluded_symbols.json
+       └── yahoo_bad_symbols.txt
+   ```
+3. 在 workflow 中已包含 checkout 步驟，若為私有 repo 需設定 `PAT_FOR_DATA_SHARE` secret
+
+## 與 Pullback Scanner 的差異
+
+| 特性 | Momentum Rank Scanner | Pullback Scanner |
+|------|----------------------|------------------|
+| **策略類型** | 動量排名 (相對 SPY) | 回調形態 (雙底/雙頂 + 0.618) |
+| **輸出頻率** | 每週六 | 每日 (工作日) |
+| **核心指標** | 20R/60R/120R/Rank | 破底翻/假突破 + 形態質量分 |
+| **適用場景** | 動量選股、板塊輪動、趨勢跟隨 | 精確進場點位、二次進場、VCP 形態 |
+| **簡報結構** | 三類別排名表格 | 流動性分組 + 回調日時間軸 |
+
+兩者可並行部署，互補使用。
+
+## 授權
+
+MIT License

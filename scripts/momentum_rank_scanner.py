@@ -560,7 +560,13 @@ def main():
     append_log(stderr_path, f"STAGE1_DONE ok={len(stage1)} liquid={len(liquid)} misses={len(miss1)}")
 
     # 3. 階段2：下載 深度數據用於動量計算
-    shard_lists = split_into_shards(liquid, max(1, args.shards))
+    # SPY 必須強制納入 Stage 2（不受流動性門檻限制），確保有基準指數資料
+    stage2_symbols = list(liquid)
+    spy_yahoo = yahoo_symbol('SPY')
+    if spy_yahoo not in stage2_symbols:
+        stage2_symbols.append(spy_yahoo)
+    
+    shard_lists = split_into_shards(stage2_symbols, max(1, args.shards))
     all_price_data = {}
     miss2 = set()
     deep_scan_count = 0
