@@ -244,11 +244,15 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
             full_download_list.append(sym)
         else:
             last_date = pd.to_datetime(cached_df['Date']).max().date()
-            # 如果最後日期 >= 昨天，表示資料已夠新，直接使用快取
-            if last_date >= today_dt - timedelta(days=1):
+            rows = len(cached_df)
+            # 如果最後日期 >= 昨天 且 資料筆數足夠 (>= MIN_LOOKBACK_DAYS)，直接使用快取
+            if last_date >= today_dt - timedelta(days=1) and rows >= MIN_LOOKBACK_DAYS:
                 frames[sym] = cached_df
             else:
-                update_list.append((sym, last_date))
+                # 資料太舊 或 筆數不足 → 需要完整重新下載（筆數不足無法增量更新）
+                if rows < MIN_LOOKBACK_DAYS:
+                    append_log(stderr_path, f"{phase}_CACHE_INSUFFICIENT_ROWS {sym}: rows={rows} < MIN_LOOKBACK_DAYS={MIN_LOOKBACK_DAYS}, will full re-download")
+                full_download_list.append(sym)
     
     append_log(stderr_path, 
                f"{phase}_CACHE_STATUS: full_download={len(full_download_list)}, "
