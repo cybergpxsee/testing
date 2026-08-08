@@ -26,6 +26,10 @@ on:
         description: 'Stage2 deep-history lookback (e.g., 1y for 52-week high/low)'
         required: false
         default: '1y'
+      spy_period:
+        description: 'SPY dedicated download period (e.g., 2y for more data)'
+        required: false
+        default: '2y'
       shards:
         description: 'Number of shards for parallel processing'
         required: false
@@ -42,6 +46,7 @@ jobs:
       MOMENTUM_SCAN_STAGE1_BATCH: ${{ github.event.inputs.stage1_batch || '120' }}
       MOMENTUM_SCAN_STAGE2_BATCH: ${{ github.event.inputs.stage2_batch || '100' }}
       MOMENTUM_SCAN_STAGE2_PERIOD: ${{ github.event.inputs.stage2_period || '1y' }}
+      MOMENTUM_SCAN_SPY_PERIOD: ${{ github.event.inputs.spy_period || '2y' }}
       MOMENTUM_SCAN_SHARDS: ${{ github.event.inputs.shards || '4' }}
       MOMENTUM_CACHE_KEEP_DAYS: '365'
     steps:
@@ -88,6 +93,14 @@ jobs:
         run: |
           mkdir -p output
           bash scripts/run_momentum_scan.sh
+
+      - name: Upload scan log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: momentum-scan-log-${{ github.run_id }}
+          path: output/*/momentum_scan.log
+          if-no-files-found: ignore
 
       - name: Generate Discord embed from JSON output
         run: |
