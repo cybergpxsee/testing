@@ -124,7 +124,7 @@ def is_probably_yahoo_friendly_symbol(symbol: str) -> bool:
     if not sym:
         return False
     yahoo_sym = yahoo_symbol(sym)
-    if sym in KNOWN_BAD_SYMBOLS or yahoo_sym in KNOWN_BAD_SYMBOLS:
+    if sym in KNOW_BAD_SYMBOLS or yahoo_sym in KNOWN_BAD_SYMBOLS:
         return False
     if any(ch in sym for ch in ["$", "+", "*"]):
         return False
@@ -230,14 +230,14 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
     """
     frames = {}
     misses = set()
-    
+
     today_dt = datetime.now(timezone.utc).date()
     cutoff_dt = today_dt - timedelta(days=CACHE_DAYS_KEEP)
-    
+
     # ----- 第一步：分類 -----
     full_download_list = []   # 完全沒有快取 → 需要完整下載
     update_list = []          # 有快取但太舊 → 需要增量更新（帶入最後日期）
-    
+
     for sym in symbols:
         cached_df = load_cached_bars(sym)
         if cached_df is None or cached_df.empty:
@@ -253,18 +253,18 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
                 if rows < MIN_LOOKBACK_DAYS:
                     append_log(stderr_path, f"{phase}_CACHE_INSUFFICIENT_ROWS {sym}: rows={rows} < MIN_LOOKBACK_DAYS={MIN_LOOKBACK_DAYS}, will full re-download")
                 full_download_list.append(sym)
-    
-    append_log(stderr_path, 
+
+    append_log(stderr_path,
                f"{phase}_CACHE_STATUS: full_download={len(full_download_list)}, "
                f"update={len(update_list)}, cache_hit={len(frames)}")
-    
+
     # ----- 第二步：完整下載（首次或快取遺失） -----
     if full_download_list:
         total_batches = max(1, math.ceil(len(full_download_list) / batch))
         for group_idx, group in enumerate(chunked(full_download_list, batch), start=1):
             append_log(stderr_path, f"{phase}_FULL_BATCH {group_idx}/{total_batches} size={len(group)}")
             time.sleep(0.5 + random.uniform(0.0, 0.5))
-            
+
             try:
                 data = yf.download(
                     tickers=' '.join(group),
@@ -281,7 +281,7 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
                 append_log(stderr_path, f"{phase}_FULL_ERROR: {e}")
                 misses.update(group)
                 continue
-            
+
             # 解析並儲存
             for sym in group:
                 try:
@@ -293,26 +293,26 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
                             continue
                     else:
                         df = data.reset_index()
-                    
+
                     # 標準化欄位
                     df = df.rename(columns={df.columns[0]: 'Date'})
                     df = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
                     df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
                     df = df.dropna(subset=['Close'])
-                    
+
                     if df.empty:
                         misses.add(sym)
                         continue
-                    
+
                     # 修剪至一年內
                     df = trim_to_rolling_window(df)
                     save_cached_bars(sym, df)
                     frames[sym] = df
-                    
+
                 except Exception as e:
                     append_log(stderr_path, f"{phase}_FULL_PARSE_ERROR {sym}: {e}")
                     misses.add(sym)
-    
+
     # ----- 第三步：增量更新（有快取但資料太舊） -----
     if update_list:
         update_symbols = [sym for sym, _ in update_list]
@@ -325,16 +325,16 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
             # 若起點早於一年前，則設為一年前（避免下載過多）
             if start_dl < cutoff_dt:
                 start_dl = cutoff_dt
-            
+
             # 若起點已經大於等於今天，則跳過
             if start_dl >= today_dt:
                 append_log(stderr_path, f"{phase}_INCR_SKIP batch={group_idx} start={start_dl} >= today")
                 continue
-            
+
             append_log(stderr_path, f"{phase}_INCR_BATCH {group_idx}/{total_batches} "
                                    f"size={len(group)} from {start_dl} to {today_dt}")
             time.sleep(0.5 + random.uniform(0.0, 0.5))
-            
+
             try:
                 data = yf.download(
                     tickers=' '.join(group),
@@ -352,7 +352,7 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
                 append_log(stderr_path, f"{phase}_INCR_ERROR: {e}")
                 misses.update(group)
                 continue
-            
+
             # 解析並合併
             for sym in group:
                 try:
@@ -370,13 +370,13 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
                             continue
                     else:
                         new_df = data.reset_index()
-                    
+
                     # 標準化
                     new_df = new_df.rename(columns={new_df.columns[0]: 'Date'})
                     new_df = new_df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
                     new_df['Date'] = pd.to_datetime(new_df['Date']).dt.tz_localize(None)
                     new_df = new_df.dropna(subset=['Close'])
-                    
+
                     if new_df.empty:
                         # 下載無資料，保留舊快取
                         old_df = load_cached_bars(sym)
@@ -385,7 +385,7 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
                         else:
                             misses.add(sym)
                         continue
-                    
+
                     # 合併舊資料
                     old_df = load_cached_bars(sym)
                     if old_df is not None:
@@ -393,12 +393,12 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
                         combined = combined.drop_duplicates(subset=['Date']).sort_values('Date')
                     else:
                         combined = new_df
-                    
+
                     # 修剪至一年內
                     combined = trim_to_rolling_window(combined)
                     save_cached_bars(sym, combined)
                     frames[sym] = combined
-                    
+
                 except Exception as e:
                     append_log(stderr_path, f"{phase}_INCR_PARSE_ERROR {sym}: {e}")
                     # 保留舊快取
@@ -407,7 +407,7 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
                         frames[sym] = old_df
                     else:
                         misses.add(sym)
-    
+
     # 回傳所有成功載入的資料（含快取和更新）
     return frames, misses
 
@@ -421,14 +421,14 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
     spy_close = spy_data['Close'].astype(float).values
     if len(spy_close) < max(MOMENTUM_WINDOWS) + 5:
         raise ValueError("SPY 數據不足")
-    
+
     spy_returns = {}
     for window in MOMENTUM_WINDOWS:
         if len(spy_close) > window:
             spy_returns[window] = (spy_close[-1] / spy_close[-window-1] - 1.0) * 100.0
         else:
             spy_returns[window] = 0.0
-    
+
     # 計算每個標的的報酬率和超額報酬
     results = []
     for sym, df in price_data.items():
@@ -437,12 +437,12 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
         close = df['Close'].astype(float).values
         if len(close) < max(MOMENTUM_WINDOWS) + 5:
             continue
-        
+
         # 當日價格和漲跌幅
         price_today = float(close[-1])
         price_prev = float(close[-2])
         pct_1d = (price_today / price_prev - 1.0) * 100.0
-        
+
         # 各窗口報酬率
         returns = {}
         excess_returns = {}
@@ -454,7 +454,7 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
             else:
                 returns[window] = 0.0
                 excess_returns[window] = 0.0
-        
+
         results.append({
             'Symbol': sym,
             'Price': round(price_today, 2),
@@ -466,25 +466,25 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
             'excess_60': excess_returns[60],
             'excess_120': excess_returns[120],
         })
-    
+
     if not results:
         return pd.DataFrame()
-    
+
     df_results = pd.DataFrame(results)
-    
+
     # 計算百分位排名 (1-99, 越大越強)
     for window in MOMENTUM_WINDOWS:
         col_excess = f'excess_{window}'
         col_rank = f'{window}R'
         # 使用 rank(pct=True) 得到 0-1 百分位，再轉為 1-99
         df_results[col_rank] = (df_results[col_excess].rank(pct=True, method='min') * 99).clip(1, 99).round(0).astype(int)
-    
+
     # 計算綜合 Rank = 0.2*20R + 0.4*60R + 0.4*120R
     df_results['Rank'] = (0.2 * df_results['20R'] + 0.4 * df_results['60R'] + 0.4 * df_results['120R']).round(1)
-    
+
     # 排序：Rank 從高到低
     df_results = df_results.sort_values('Rank', ascending=False).reset_index(drop=True)
-    
+
     # 只保留需要的欄位
     output_cols = ['Symbol', 'Price', '1D%', '20R', '60R', '120R', 'Rank', 'REL20', 'REL60', 'REL120']
     return df_results[output_cols]
@@ -498,21 +498,21 @@ def filter_categories(df: pd.DataFrame) -> dict:
         (df['60R'] >= 75) & (df['60R'] <= 89) &
         (df['120R'] < 80)
     ].copy()
-    
+
     # 2. 20R和60R同時在90以上但120R在80以下
     cat2 = df[
         (df['20R'] >= 90) &
         (df['60R'] >= 90) &
         (df['120R'] < 80)
     ].copy()
-    
+
     # 3. 總Rank >= 90
     cat3 = df[df['Rank'] >= 90].copy()
-    
+
     # 都按 Rank 從高到低排序
     for cat in [cat1, cat2, cat3]:
         cat.sort_values('Rank', ascending=False, inplace=True)
-    
+
     return {
         'category1_20R60R_75_89_120R_lt80': cat1,
         'category2_20R60R_ge90_120R_lt80': cat2,
@@ -523,7 +523,7 @@ def filter_categories(df: pd.DataFrame) -> dict:
 def generate_report(categories: dict, scan_info: dict) -> str:
     """生成 Markdown 簡報"""
     lines = []
-    
+
     lines.append("📊 **美股動量排名週報**")
     lines.append("")
     lines.append(f"📅 掃描日期：{scan_info.get('scan_date', '未知')}")
@@ -533,7 +533,7 @@ def generate_report(categories: dict, scan_info: dict) -> str:
     lines.append("")
     lines.append("---")
     lines.append("")
-    
+
     # 類別 1
     cat1 = categories['category1_20R60R_75_89_120R_lt80']
     lines.append(f"## 🟡 類別 1：20R&60R在 75-89，但 120R < 80 （共 {len(cat1)} 檔）")
@@ -546,7 +546,7 @@ def generate_report(categories: dict, scan_info: dict) -> str:
     else:
         lines.append("*無符合條件標的*")
     lines.append("")
-    
+
     # 類別 2
     cat2 = categories['category2_20R60R_ge90_120R_lt80']
     lines.append(f"## 🟢 類別 2：20R&60R ≥ 90，但 120R < 80 （共 {len(cat2)} 檔）")
@@ -559,7 +559,7 @@ def generate_report(categories: dict, scan_info: dict) -> str:
     else:
         lines.append("*無符合條件標的*")
     lines.append("")
-    
+
     # 類別 3
     cat3 = categories['category3_rank_ge90']
     lines.append(f"## 🔵 類別 3：總 Rank ≥ 90 （共 {len(cat3)} 檔）")
@@ -572,11 +572,11 @@ def generate_report(categories: dict, scan_info: dict) -> str:
     else:
         lines.append("*無符合條件標的*")
     lines.append("")
-    
+
     lines.append("---")
     lines.append("")
     lines.append("⚠️ **風險提示**：此為動量排名篩選結果，非買賣建議。排名基於相對 SPY 的超額報酬百分位，數值越大代表相對動量越強。請自行判斷風險。")
-    
+
     return "\n".join(lines)
 
 
@@ -585,22 +585,22 @@ def generate_discord_embed(categories: dict, scan_info: dict) -> dict:
     cat1 = categories['category1_20R60R_75_89_120R_lt80']
     cat2 = categories['category2_20R60R_ge90_120R_lt80']
     cat3 = categories['category3_rank_ge90']
-    
+
     def format_category(df, title):
         if len(df) == 0:
             return {"name": title, "value": "無符合條件標的", "inline": False}
-        
+
         display_df = df.head(20)
         lines = []
         for _, row in display_df.iterrows():
             lines.append(f"`{row['Symbol']}` 20R:{int(row['20R'])} 60R:{int(row['60R'])} 120R:{int(row['120R'])} Rank:{row['Rank']:.1f}")
-        
+
         value = "\n".join(lines)
         if len(df) > 20:
             value += f"\n... 共 {len(df)} 檔，僅顯示前 20"
-        
+
         return {"name": title, "value": value, "inline": False}
-    
+
     embed = {
         "title": "📊 美股動量排名週報",
         "description": f"掃描日期：{scan_info.get('scan_date', '未知')} | 標的：{scan_info.get('valid_count', 0)}/{scan_info.get('universe_total', 0)}",
@@ -613,7 +613,7 @@ def generate_discord_embed(categories: dict, scan_info: dict) -> dict:
         "footer": {"text": "相對 SPY 超額報酬百分位排名 | 非投資建議"},
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    
+
     return {"embeds": [embed]}
 
 
@@ -690,18 +690,18 @@ def main():
         pre_count = len(uni)
         uni = uni[~uni['Symbol'].isin(monthly_excluded)].reset_index(drop=True)
         append_log(stderr_path, f"MONTHLY_EXCLUDED_APPLIED: removed {pre_count - len(uni)} symbols")
-    
+
     if args.max_symbols and args.max_symbols > 0:
         uni = uni.head(args.max_symbols).copy()
     original_symbols = uni['Symbol'].tolist()
     mapped = {yahoo_symbol(sym): sym for sym in original_symbols}
     yahoo_symbols = list(mapped.keys())
-    
+
     # 確保 SPY 在列表中
     if 'SPY' not in yahoo_symbols:
         yahoo_symbols.append('SPY')
         mapped['SPY'] = 'SPY'
-    
+
     append_log(stderr_path, f"UNIVERSE_TOTAL={len(original_symbols)} (含SPY)")
 
     # 2. 階段1：流動性篩選 (1mo 數據)
@@ -722,16 +722,16 @@ def main():
     stage2_symbols = list(liquid)
     spy_yahoo = yahoo_symbol('SPY')
     spy_period = getattr(args, 'spy_period', None) or os.environ.get('MOMENTUM_SCAN_SPY_PERIOD', '2y')
-    
+
     append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY start symbol={spy_yahoo} period={spy_period}")
-    
+
     # SPY 下載重試機制（最多 3 次）
     spy_data_dict = {}
     spy_miss = set()
     for attempt in range(3):
         append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY_ATTEMPT {attempt+1}/3 symbol={spy_yahoo} period={spy_period}")
         spy_data_dict, spy_miss = download_bars([spy_yahoo], spy_period, stderr_path, batch=1, phase='STAGE2_SPY')
-        
+
         if spy_yahoo in spy_data_dict:
             rows = len(spy_data_dict[spy_yahoo])
             append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY_ATTEMPT {attempt+1} done rows={rows}")
@@ -742,15 +742,18 @@ def main():
                 append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY_ATTEMPT {attempt+1} insufficient data rows={rows} < MIN_LOOKBACK_DAYS={MIN_LOOKBACK_DAYS}")
         else:
             append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY_ATTEMPT {attempt+1} failed misses={spy_miss}")
-        
+
         if attempt < 2:
             wait_s = 5 + random.uniform(2, 5)
             append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY_RETRY wait={wait_s:.1f}s before next attempt")
             time.sleep(wait_s)
-    
-    if spy_yahoo in spy_data_dict and len(spy_data_dict[spy_yahoo]) >= MIN_LOOKBACK_DAYS:
+
+    # SPY 專用最小行數門檻（可比全域更寬鬆，例如 200），不影響其他標的
+    SPY_MIN_DAYS = 200
+
+    if spy_yahoo in spy_data_dict and len(spy_data_dict[spy_yahoo]) >= SPY_MIN_DAYS:
         all_price_data = {spy_yahoo: spy_data_dict[spy_yahoo]}
-        append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY final success rows={len(spy_data_dict[spy_yahoo])}")
+        append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY final success rows={len(spy_data_dict[spy_yahoo])} (>= SPY_MIN_DAYS={SPY_MIN_DAYS})")
     else:
         append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY failed after 3 attempts: {spy_yahoo} not available or insufficient data, misses={spy_miss}")
         # 即使失敗也寫出錯誤 JSON
@@ -771,7 +774,7 @@ def main():
         (artifact_dir / 'momentum_rank_output.json').write_text(json.dumps(error_output, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
         print(json.dumps(error_output, ensure_ascii=False, indent=2, default=str))
         sys.exit(1)
-    
+
     # 其餘標的照常分 shard 下載（不含 SPY）
     shard_lists = split_into_shards(stage2_symbols, max(1, args.shards))
     all_price_data = {spy_yahoo: spy_data_dict[spy_yahoo]}
@@ -784,12 +787,12 @@ def main():
         stage2, shard_miss = download_bars(shard_symbols, stage2_period, stderr_path, batch=args.stage2_batch, phase=f'STAGE2_SHARD_{shard_idx:02d}')
         deep_scan_count += len(stage2)
         miss2.update(shard_miss)
-        
+
         # 過濾數據長度足夠的
         for ys, df in stage2.items():
             if len(df) >= MIN_LOOKBACK_DAYS:
                 all_price_data[ys] = df
-        
+
         append_log(stderr_path, f"STAGE2_SHARD_DONE shard={shard_idx} downloaded={len(stage2)} valid={len([d for d in stage2.values() if len(d)>=MIN_LOOKBACK_DAYS])} misses={len(shard_miss)}")
 
     # 4. 計算動量排名
@@ -814,10 +817,10 @@ def main():
         (artifact_dir / 'momentum_rank_output.json').write_text(json.dumps(error_output, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
         print(json.dumps(error_output, ensure_ascii=False, indent=2, default=str))
         sys.exit(1)
-    
+
     # 移除 SPY 不參與排名
     scan_data = {k: v for k, v in all_price_data.items() if k != 'SPY'}
-    
+
     append_log(stderr_path, f"MOMENTUM_CALC_START symbols={len(scan_data)}")
     momentum_df = calculate_momentum_ranks(scan_data, spy_data)
     append_log(stderr_path, f"MOMENTUM_CALC_DONE ranked={len(momentum_df)}")
@@ -845,7 +848,7 @@ def main():
         'full_rankings': momentum_df.to_dict('records'),
         'categories': {k: v.to_dict('records') for k, v in categories.items()},
     }
-    
+
     (artifact_dir / 'momentum_rank_output.json').write_text(json.dumps(output_json, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
 
     # 根據格式輸出
