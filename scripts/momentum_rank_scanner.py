@@ -595,22 +595,25 @@ def generate_discord_embed(categories: dict, scan_info: dict) -> dict:
 
     def format_category(df, title):
         if len(df) == 0:
-            return {"name": title, "value": "無符合條件標的", "inline": False}
+            return {"name": title, "value": "```\n無符合條件標的\n```", "inline": False}
 
         display_df = df.head(20)
         lines = []
+        # 表頭
+        lines.append(f"{'代碼':<6} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
+        lines.append(f"{'------':-<6}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
         for _, row in display_df.iterrows():
-            lines.append(f"`{row['Symbol']}` 20R:{int(row['20R'])} 60R:{int(row['60R'])} 120R:{int(row['120R'])} Rank:{row['Rank']:.1f}")
+            lines.append(f"{row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
 
-        value = "\n".join(lines)
+        value = "```\n" + "\n".join(lines) + "\n```"
         if len(df) > 20:
             value += f"\n... 共 {len(df)} 檔，僅顯示前 20"
 
         return {"name": title, "value": value, "inline": False}
 
     embed = {
-        "title": "📊 美股動量排名週報",
-        "description": f"掃描日期：{scan_info.get('scan_date', '未知')} | 標的：{scan_info.get('valid_count', 0)}/{scan_info.get('universe_total', 0)}",
+        "title": "美股動量排名週報",
+        "description": f"掃描日期: {scan_info.get('scan_date', '未知')} | 目標: {scan_info.get('valid_count', 0)}/{scan_info.get('universe_total', 0)}",
         "color": 0x3498db,
         "fields": [
             format_category(cat1, "底部反轉 1"),
