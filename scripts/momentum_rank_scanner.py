@@ -35,7 +35,7 @@ MOMENTUM_WINDOWS = [20, 60, 120]
 SPY_SYMBOL = "SPY"
 
 # 掃描參數
-MIN_LOOKBACK_DAYS = 252  # 至少需要 1 年數據
+MIN_LOOKBACK_DAYS = 200  # 原為 252，調整為 200 以符合大多數標的的 1 年數據量
 LIQUIDITY_THRESHOLD = 20_000_000  # 20日均交易額門檻
 
 # ===== 快取設定 =====
@@ -492,6 +492,13 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
 
 def filter_categories(df: pd.DataFrame) -> dict:
     """依照三個條件分類"""
+    if df.empty:
+        return {
+            'category1_20R60R_75_89_120R_lt80': df.copy(),
+            'category2_20R60R_ge90_120R_lt80': df.copy(),
+            'category3_rank_ge90': df.copy(),
+        }
+
     # 1. 20R和60R同時在75-89但120R在80以下
     cat1 = df[
         (df['20R'] >= 75) & (df['20R'] <= 89) &
