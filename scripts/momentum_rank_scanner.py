@@ -655,6 +655,7 @@ def main():
     parser.add_argument('--stage1-batch', type=int, default=int(os.environ.get('MOMENTUM_SCAN_STAGE1_BATCH', '120')))
     parser.add_argument('--stage2-batch', type=int, default=int(os.environ.get('MOMENTUM_SCAN_STAGE2_BATCH', '100')))
     parser.add_argument('--stage2-period', default=os.environ.get('MOMENTUM_SCAN_STAGE2_PERIOD', '1y'))
+    parser.add_argument('--spy-period', default=os.environ.get('MOMENTUM_SCAN_SPY_PERIOD', '2y'), help='SPY dedicated download period (e.g., 2y)')
     args = parser.parse_args()
 
     stderr_path = args.stderr_path
@@ -713,16 +714,41 @@ def main():
 
     # 3. 階段2：下載深度數據用於動量計算
     # SPY 獨立下載（最穩健）：單獨下載、單獨驗證、不受 shard 分片影響
+    # SPY 強制使用更長的 period 確保獲得足夠數據（至少 252 個交易日），可透過環境變數覆蓋
     stage2_symbols = list(liquid)
     spy_yahoo = yahoo_symbol('SPY')
+    spy_period = getattr(args, 'spy_period', None) or os.environ.get('MOMENTUM_SCAN_SPY_PERIOD', '2y')
     
-    append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY start symbol={spy_yahoo} period={args.stage2_period}")
-    spy_data_dict, spy_miss = download_bars([spy_yahoo], args.stage2_period, stderr_path, batch=1, phase='STAGE2_SPY')
+    append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY start symbol={spy_yahoo} period={spy_period}")
+    
+    # SPY 下載重試機制（最多 3 次）
+    spy_data_dict = {}
+    spy_miss = set()
+    for attempt in range(3):
+        append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY_ATTEMPT {attempt+1}/3 symbol={spy_yahoo} period={spy_period}")
+        spy_data_dict, spy_miss = download_bars([spy_yahoo], spy_period, stderr_path, batch=1, phase='STAGE2_SPY')
+        
+        if spy_yahoo in spy_data_dict:
+            rows = len(spy_data_dict[spy_yahoo])
+            append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY_ATTEMPT {attempt+1} done rows={rows}")
+            if rows >= MIN_LOOKBACK_DAYS:
+                append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY success rows={rows} (>= MIN_LOOKBACK_DAYS={MIN_LOOKBACK_DAYS})")
+                break
+            else:
+                append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY_ATTEMPT {attempt+1} insufficient data rows={rows} < MIN_LOOKBACK_DAYS={MIN_LOOKBACK_DAYS}")
+        else:
+            append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY_ATTEMPT {attempt+1} failed misses={spy_miss}")
+        
+        if attempt < 2:
+            wait_s = 5 + random.uniform(2, 5)
+            append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY_RETRY wait={wait_s:.1f}s before next attempt")
+            time.sleep(wait_s)
+    
     if spy_yahoo in spy_data_dict and len(spy_data_dict[spy_yahoo]) >= MIN_LOOKBACK_DAYS:
         all_price_data = {spy_yahoo: spy_data_dict[spy_yahoo]}
-        append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY success rows={len(spy_data_dict[spy_yahoo])}")
+        append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY final success rows={len(spy_data_dict[spy_yahoo])}")
     else:
-        append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY failed: {spy_yahoo} not available or insufficient data, misses={spy_miss}")
+        append_log(stderr_path, f"STAGE2_DOWNLOAD_SPY failed after 3 attempts: {spy_yahoo} not available or insufficient data, misses={spy_miss}")
         # 即使失敗也寫出錯誤 JSON
         error_output = {
             'generated_at_utc': datetime.now(timezone.utc).isoformat(),
@@ -733,7 +759,7 @@ def main():
                 'valid_count': 0,
                 'stage1_misses': len(miss1),
                 'stage2_misses': len(miss1) | len(spy_miss),
-                'error': f'SPY ({spy_yahoo}) download failed or insufficient data'
+                'error': f'SPY ({spy_yahoo}) download failed or insufficient data after 3 attempts'
             },
             'full_rankings': [],
             'categories': {},
