@@ -614,33 +614,34 @@ def generate_discord_embed(categories: dict, scan_info: dict) -> dict:
 
 
 def load_universe_from_cache() -> pd.DataFrame | None:
-    """優先從 data/universe/us_symbols.csv 讀取預篩選清單"""
+    """讀取共享篩選池（僅回傳股票池）"""
     cache_path = Path("data/universe/us_symbols.csv")
     if cache_path.exists():
         df = pd.read_csv(cache_path)
         # 只保留一般股票（排除 ETF 和測試標的）
-        df = df[(df.get('etf', False) == False) & (df.get('test_issue', False) == False)]
+        df = df[(df['etf'] == False) & (df['test_issue'] == False)]
         return df[['Symbol', 'name']].copy()
-    
-    # 也檢查月更排除清單
-    monthly_excluded_path = Path("data/universe/monthly_excluded_symbols.json")
-    if monthly_excluded_path.exists():
+    return None
+
+
+def load_monthly_excluded() -> set:
+    """讀取月更排除清單"""
+    excluded = set()
+    path = Path("data/universe/monthly_excluded_symbols.json")
+    if path.exists():
         try:
             import json
-            with open(monthly_excluded_path, 'r', encoding='utf-8') as f:
-                monthly_data = json.load(f)
-            # 將排除清單轉為 set 以便快速查找
-            excluded = set()
-            for sym in monthly_data.get('generated_symbols', []) or []:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            for sym in data.get('generated_symbols', []) or []:
                 s = str(sym).strip().upper()
                 if s:
                     excluded.add(s)
                     excluded.add(s.replace('-', '.'))
                     excluded.add(s.replace('.', '-'))
-            return excluded
         except Exception:
             pass
-    return None
+    return excluded
 
 
 def main():
@@ -664,21 +665,11 @@ def main():
     scan_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     append_log(stderr_path, f"MOMENTUM_SCAN_START format={args.format} max_symbols={args.max_symbols or 'all'} shards={max(1, args.shards)} stage1_period={args.stage1_period}")
 
-    # 1. 獲取股票池（優先讀取共享篩選池快取）
-    universe_cache = load_universe_from_cache()
-    
-    monthly_excluded = set()
-    if isinstance(universe_cache, set):
-        # load_universe_from_cache 返回的是月更排除清單
-        monthly_excluded = universe_cache
-        universe_cache = None
-    
-    if universe_cache is not None and not universe_cache.empty:
-        # 成功從快取讀取
-        uni = universe_cache.copy()
+    # 1. 獲取股票池（優先讀取共享篩選池）
+    uni = load_universe_from_cache()
+    if uni is not None:
         append_log(stderr_path, f"UNIVERSE_LOADED_FROM_CACHE: {len(uni)} symbols")
     else:
-        # 若無快取才連線 Nasdaq（備援）
         append_log(stderr_path, "UNIVERSE_CACHE_NOT_FOUND, falling back to Nasdaq Trader")
         nasdaq = parse_nasdaq_listed(fetch_text(NASDAQ_LISTED_URL))
         other = parse_other_listed(fetch_text(OTHER_LISTED_URL))
@@ -686,12 +677,13 @@ def main():
         uni = uni.drop_duplicates(subset=['Symbol']).reset_index(drop=True)
         uni['keep'] = uni.apply(lambda r: is_regular_security(r['Symbol'], r['name'], bool(r['etf']), bool(r['test_issue'])), axis=1)
         uni = uni[uni['keep']].copy()
-    
-    # 應用月更排除清單
+
+    # 2. 應用月更排除清單
+    monthly_excluded = load_monthly_excluded()
     if monthly_excluded:
         uni['Symbol'] = uni['Symbol'].astype(str).str.upper()
         pre_count = len(uni)
-        uni = uni[~uni['Symbol'].isin(monthly_excluded)].copy()
+        uni = uni[~uni['Symbol'].isin(monthly_excluded)].reset_index(drop=True)
         append_log(stderr_path, f"MONTHLY_EXCLUDED_APPLIED: removed {pre_count - len(uni)} symbols")
     
     if args.max_symbols and args.max_symbols > 0:
