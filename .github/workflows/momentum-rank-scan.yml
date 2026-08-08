@@ -43,6 +43,7 @@ jobs:
       MOMENTUM_SCAN_STAGE2_BATCH: ${{ github.event.inputs.stage2_batch || '100' }}
       MOMENTUM_SCAN_STAGE2_PERIOD: ${{ github.event.inputs.stage2_period || '1y' }}
       MOMENTUM_SCAN_SHARDS: ${{ github.event.inputs.shards || '4' }}
+      MOMENTUM_CACHE_KEEP_DAYS: '365'
     steps:
       - name: Checkout current repository (source code)
         uses: actions/checkout@v4
@@ -60,6 +61,14 @@ jobs:
         run: |
           mkdir -p data/universe
           cp -r .tmp/shared-universe/data/universe/* data/universe/
+
+      - name: Cache yfinance data
+        uses: actions/cache@v4
+        with:
+          path: data/cache/
+          key: yfinance-cache-${{ github.run_id }}-${{ hashFiles('data/universe/us_symbols.csv') }}
+          restore-keys: |
+            yfinance-cache-
 
       - name: Setup Python
         uses: actions/setup-python@v5
