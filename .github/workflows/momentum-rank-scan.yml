@@ -1,0 +1,116 @@
+name: momentum-rank-scan
+
+on:
+  schedule:
+    # 每週六 06:00 UTC 執行 (台灣時間週六 14:00)
+    - cron: '0 6 * * 6'
+  workflow_dispatch:
+    inputs:
+      max_symbols:
+        description: 'Optional cap for smoke test; leave empty for full universe'
+        required: false
+        default: ''
+      stage1_period:
+        description: 'Stage1 liquidity lookback'
+        required: false
+        default: '1mo'
+      stage1_batch:
+        description: 'Stage1 batch size'
+        required: false
+        default: '120'
+      stage2_batch:
+        description: 'Stage2 batch size'
+        required: false
+        default: '100'
+      stage2_period:
+        description: 'Stage2 deep-history lookback (e.g., 1y for 52-week high/low)'
+        required: false
+        default: '1y'
+      shards:
+        description: 'Number of shards for parallel processing'
+        required: false
+        default: '4'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PYTHONUNBUFFERED: '1'
+      MOMENTUM_SCAN_MAX_SYMBOLS: ${{ github.event.inputs.max_symbols || '' }}
+      MOMENTUM_SCAN_STAGE1_PERIOD: ${{ github.event.inputs.stage1_period || '1mo' }}
+      MOMENTUM_SCAN_STAGE1_BATCH: ${{ github.event.inputs.stage1_batch || '120' }}
+      MOMENTUM_SCAN_STAGE2_BATCH: ${{ github.event.inputs.stage2_batch || '100' }}
+      MOMENTUM_SCAN_STAGE2_PERIOD: ${{ github.event.inputs.stage2_period || '1y' }}
+      MOMENTUM_SCAN_SHARDS: ${{ github.event.inputs.shards || '4' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull shared universe data
+        uses: actions/checkout@v4
+        with:
+          repository: cybergpxsee/data-share
+          path: .tmp/shared-universe
+          fetch-depth: 1
+          # 如果倉庫是私有的，請取消註解並設定 secret：
+          # token: ${{ secrets.PAT_FOR_DATA_SHARE }}
+
+      - name: Copy universe files to local data/universe
+        run: |
+          mkdir -p data/universe
+          cp -r .tmp/shared-universe/data/universe/* data/universe/
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run momentum rank scan
+        env:
+          MOMENTUM_SCAN_STAGE2_PERIOD: ${{ github.event.inputs.stage2_period || '1y' }}
+          MOMENTUM_SCAN_ARTIFACT_DIR: output
+        run: |
+          mkdir -p output
+          bash scripts/run_momentum_scan.sh
+
+      - name: Generate Discord embed from JSON output
+        run: |
+          latest_json=$(find output -name 'momentum_rank_output.json' | sort | tail -n 1)
+          python scripts/render_momentum_report.py "$latest_json" output/
+
+      - name: Upload output artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: momentum-rank-scan-${{ github.run_id }}
+          path: output/
+          if-no-files-found: error
+
+      - name: Append latest markdown to job summary
+        shell: bash
+        run: |
+          latest_md=$(find output -name 'momentum_rank_report.md' | sort | tail -n 1)
+          echo '## 📊 Latest Momentum Rank Report' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          cat "$latest_md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Discord payload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-payload-${{ github.run_id }}
+          path: output/momentum_discord_embed.json
+          if-no-files-found: warn
+
+      - name: Send Discord embed
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        if: success() && env.DISCORD_WEBHOOK_URL != ''
+        run: |
+          payload=$(find output -name 'momentum_discord_embed.json' | sort | tail -n 1)
+          python scripts/post_to_discord.py "$payload"
