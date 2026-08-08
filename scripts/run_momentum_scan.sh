@@ -43,6 +43,8 @@ echo "Max symbols: ${MAX_SYMBOLS:-all}"
     --stage2-period "$STAGE2_PERIOD" \
     ${MAX_SYMBOLS:+--max-symbols "$MAX_SYMBOLS"}
 
+SCAN_EXIT_CODE=$?
+
 # 生成 Discord embed
 LATEST_JSON=$(find "$ARTIFACT_DIR" -name 'momentum_rank_output.json' | sort | tail -n 1)
 if [[ -n "$LATEST_JSON" && -f "$LATEST_JSON" ]]; then
@@ -51,7 +53,23 @@ if [[ -n "$LATEST_JSON" && -f "$LATEST_JSON" ]]; then
     echo "Generated Markdown report: $ARTIFACT_DIR/momentum_rank_report.md"
 else
     echo "ERROR: momentum_rank_output.json not found"
+    # 印出 log 以利除錯
+    if [[ -f "$RUN_DIR/momentum_scan.log" ]]; then
+        echo "=== momentum_scan.log ==="
+        cat "$RUN_DIR/momentum_scan.log"
+    fi
     exit 1
+fi
+
+# 如果 Python 回傳非零，印出 log 並失敗
+if [[ $SCAN_EXIT_CODE -ne 0 ]]; then
+    echo "=== Scanner exited with code $SCAN_EXIT_CODE ==="
+    if [[ -f "$RUN_DIR/momentum_scan.log" ]]; then
+        echo "=== momentum_scan.log ==="
+        cat "$RUN_DIR/momentum_scan.log"
+    fi
+    # 即使 scanner 失敗，若已產出 JSON 仍繼續處理（可能包含錯誤資訊）
+    # 這裡選擇不強制 exit，讓後續步驟能上傳 artifact
 fi
 
 # 複製到最終輸出目錄

@@ -583,7 +583,25 @@ def main():
     spy_data = all_price_data.get('SPY')
     if spy_data is None:
         append_log(stderr_path, "ERROR: SPY data not available!")
-        return
+        # 即使失敗也寫出基本 JSON，避免後續找不到檔案
+        error_output = {
+            'generated_at_utc': datetime.now(timezone.utc).isoformat(),
+            'scan_info': {
+                'scan_date': scan_date,
+                'universe_total': len(original_symbols),
+                'liquid_count': len(liquid),
+                'valid_count': 0,
+                'stage1_misses': len(miss1),
+                'stage2_misses': len(miss2),
+                'error': 'SPY data not available'
+            },
+            'full_rankings': [],
+            'categories': {},
+        }
+        (artifact_dir / 'momentum_rank_output.json').write_text(json.dumps(error_output, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+        # 將錯誤輸出到 stdout 供 GitHub Actions 捕捉
+        print(json.dumps(error_output, ensure_ascii=False, indent=2, default=str))
+        sys.exit(1)
     
     # 移除 SPY 不參與排名
     scan_data = {k: v for k, v in all_price_data.items() if k != 'SPY'}
