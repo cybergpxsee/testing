@@ -44,7 +44,7 @@ jobs:
       MOMENTUM_SCAN_STAGE2_PERIOD: ${{ github.event.inputs.stage2_period || '1y' }}
       MOMENTUM_SCAN_SHARDS: ${{ github.event.inputs.shards || '4' }}
     steps:
-      - name: Checkout
+      - name: Checkout current repository (source code)
         uses: actions/checkout@v4
 
       - name: Pull shared universe data
