@@ -543,39 +543,39 @@ def generate_report(categories: dict, scan_info: dict) -> str:
 
     # 類別 1
     cat1 = categories['category1_20R60R_75_89_120R_lt80']
-    lines.append(f"## 🟡 類別 1：20R&60R在 75-89，但 120R < 80 （共 {len(cat1)} 檔）")
+    lines.append("底部反轉 1")
     lines.append("")
     if len(cat1) > 0:
         lines.append("| 代碼 | 20R | 60R | 120R | Rank |")
         lines.append("|------|-----|-----|------|------|")
         for _, row in cat1.iterrows():
-            lines.append(f"| {row['Symbol']} | {int(row['20R'])} | {int(row['60R'])} | {int(row['120R'])} | {row['Rank']:.1f} |")
+            lines.append(f"| {row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} |")
     else:
         lines.append("*無符合條件標的*")
     lines.append("")
 
     # 類別 2
     cat2 = categories['category2_20R60R_ge90_120R_lt80']
-    lines.append(f"## 🟢 類別 2：20R&60R ≥ 90，但 120R < 80 （共 {len(cat2)} 檔）")
+    lines.append("底部反轉 2")
     lines.append("")
     if len(cat2) > 0:
         lines.append("| 代碼 | 20R | 60R | 120R | Rank |")
         lines.append("|------|-----|-----|------|------|")
         for _, row in cat2.iterrows():
-            lines.append(f"| {row['Symbol']} | {int(row['20R'])} | {int(row['60R'])} | {int(row['120R'])} | {row['Rank']:.1f} |")
+            lines.append(f"| {row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} |")
     else:
         lines.append("*無符合條件標的*")
     lines.append("")
 
     # 類別 3
     cat3 = categories['category3_rank_ge90']
-    lines.append(f"## 🔵 類別 3：總 Rank ≥ 90 （共 {len(cat3)} 檔）")
+    lines.append("超強勢")
     lines.append("")
     if len(cat3) > 0:
         lines.append("| 代碼 | 20R | 60R | 120R | Rank |")
         lines.append("|------|-----|-----|------|------|")
         for _, row in cat3.iterrows():
-            lines.append(f"| {row['Symbol']} | {int(row['20R'])} | {int(row['60R'])} | {int(row['120R'])} | {row['Rank']:.1f} |")
+            lines.append(f"| {row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} |")
     else:
         lines.append("*無符合條件標的*")
     lines.append("")
@@ -613,9 +613,9 @@ def generate_discord_embed(categories: dict, scan_info: dict) -> dict:
         "description": f"掃描日期：{scan_info.get('scan_date', '未知')} | 標的：{scan_info.get('valid_count', 0)}/{scan_info.get('universe_total', 0)}",
         "color": 0x3498db,
         "fields": [
-            format_category(cat1, "🟡 類別1：20R&60R 75-89, 120R<80"),
-            format_category(cat2, "🟢 類別2：20R&60R ≥90, 120R<80"),
-            format_category(cat3, "🔵 類別3：Rank ≥ 90"),
+            format_category(cat1, "底部反轉 1"),
+            format_category(cat2, "底部反轉 2"),
+            format_category(cat3, "超強勢"),
         ],
         "footer": {"text": "相對 SPY 超額報酬百分位排名 | 非投資建議"},
         "timestamp": datetime.now(timezone.utc).isoformat()
