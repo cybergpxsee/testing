@@ -21,11 +21,15 @@ def render_markdown(json_path: Path, output_path: Path) -> str:
     cat1 = pd.DataFrame(categories.get('category1_20R60R_75_89_120R_lt80', []))
     cat2 = pd.DataFrame(categories.get('category2_20R60R_ge90_120R_lt80', []))
     cat3 = pd.DataFrame(categories.get('category3_rank_ge90', []))
+    cat4 = pd.DataFrame(categories.get('category4_bottom_proximity', []))
 
     # 確保按 Rank 排序
     for cat in [cat1, cat2, cat3]:
         if len(cat) > 0 and 'Rank' in cat.columns:
             cat.sort_values('Rank', ascending=False, inplace=True)
+    # cat4 按 proximity 排序
+    if len(cat4) > 0 and 'proximity' in cat4.columns:
+        cat4.sort_values('proximity', ascending=True, inplace=True)
 
     lines = []
     lines.append("📊 **美股動量排名週報**")
@@ -54,6 +58,18 @@ def render_markdown(json_path: Path, output_path: Path) -> str:
     render_category(cat2, "類別 2：20R&60R ≥ 90，但 120R < 80", "🟢")
     render_category(cat3, "類別 3：總 Rank ≥ 90", "🔵")
 
+    # 類別 4：底部接近候選
+    lines.append(f"## 📉 底部接近候選（距120日最低 < 5%） （共 {len(cat4)} 檔）")
+    lines.append("")
+    if len(cat4) > 0:
+        lines.append("| 代碼 | 20R | 60R | 120R | Rank | 底部接近度 |")
+        lines.append("|------|-----|-----|------|------|----------|")
+        for _, row in cat4.iterrows():
+            lines.append(f"| {row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} | {row['proximity']:.2%} |")
+    else:
+        lines.append("*無符合條件標的*")
+    lines.append("")
+
     lines.append("---")
     lines.append("")
     lines.append("⚠️ **風險提示**：此為動量排名篩選結果，非買賣建議。排名基於相對 SPY 的超額報酬百分位，數值越大代表相對動量越強。請自行判斷風險。")
@@ -73,22 +89,31 @@ def render_discord(json_path: Path, output_path: Path) -> dict:
     cat1 = pd.DataFrame(categories.get('category1_20R60R_75_89_120R_lt80', []))
     cat2 = pd.DataFrame(categories.get('category2_20R60R_ge90_120R_lt80', []))
     cat3 = pd.DataFrame(categories.get('category3_rank_ge90', []))
+    cat4 = pd.DataFrame(categories.get('category4_bottom_proximity', []))
 
     for cat in [cat1, cat2, cat3]:
         if len(cat) > 0 and 'Rank' in cat.columns:
             cat.sort_values('Rank', ascending=False, inplace=True)
+    if len(cat4) > 0 and 'proximity' in cat4.columns:
+        cat4.sort_values('proximity', ascending=True, inplace=True)
 
-    def format_category(df, title):
+    def format_category(df, title, show_proximity=False):
         if len(df) == 0:
             return {"name": title, "value": "```\n無符合條件標的\n```", "inline": False}
 
         display_df = df.head(20)
         lines = []
         # 表頭
-        lines.append(f"{'代碼':<6} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
-        lines.append(f"{'------':-<6}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
-        for _, row in display_df.iterrows():
-            lines.append(f"{row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
+        if show_proximity:
+            lines.append(f"{'代碼':<6} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5} | {'接近度':>6}")
+            lines.append(f"{'------':-<6}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}-|-{'-'*6:->6}")
+            for _, row in display_df.iterrows():
+                lines.append(f"{row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} | {row['proximity']:.2%}")
+        else:
+            lines.append(f"{'代碼':<6} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
+            lines.append(f"{'------':-<6}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
+            for _, row in display_df.iterrows():
+                lines.append(f"{row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
 
         value = "```\n" + "\n".join(lines) + "\n```"
         if len(df) > 20:
@@ -104,6 +129,7 @@ def render_discord(json_path: Path, output_path: Path) -> dict:
             format_category(cat1, "底部反轉 1"),
             format_category(cat2, "底部反轉 2"),
             format_category(cat3, "超強勢"),
+            format_category(cat4, "📉 底部接近候選（<5%）", show_proximity=True),
         ],
         "footer": {"text": "相對 SPY 超額報酬百分位排名 | 非投資建議"},
         "timestamp": datetime.now(timezone.utc).isoformat()
