@@ -5,8 +5,8 @@
 1. 20R和60R同時在75-89但120R在80以下（底部反轉 1）
 2. 20R和60R同時在90以上但120R在80以下（底部反轉 2）
 3. 總Rank >= 90（超強勢）
-4. 突破平台/筹码密集：從上述三類中篩選出剛突破平台且接近筹码密集區的股票
-排序：類別 1/2/3 按 Rank 從高到低；類別 4 按 BreakoutPct 升序（越貼近越前）
+4. 貼近 200日均線 / 籌碼密集（價格在 SMA200 上方）
+排序：類別 1/2/3 按 Rank 從高到低；類別 4 按 DistToSMA200 升序（越貼近越前），同距則 VWAPDev 升序
 """
 
 import argparse
@@ -117,6 +117,7 @@ def load_known_bad_symbols(path: Path | None = None) -> set[str]:
         out.add(upper.replace('.', '-'))
     return out
 
+
 KNOWN_BAD_SYMBOLS = load_known_bad_symbols()
 
 
@@ -125,7 +126,7 @@ def is_probably_yahoo_friendly_symbol(symbol: str) -> bool:
     if not sym:
         return False
     yahoo_sym = yahoo_symbol(sym)
-    if sym in KNOW_BAD_SYMBOLS or yahoo_sym in KNOWN_BAD_SYMBOLS:
+    if sym in KNOWN_BAD_SYMBOLS or yahoo_sym in KNOWN_BAD_SYMBOLS:
         return False
     if any(ch in sym for ch in ["$", "+", "*"]):
         return False
@@ -417,7 +418,7 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
     """
     計算所有標的的動量排名
     Returns DataFrame with columns: Symbol, Price, 1D%, 20R, 60R, 120R, Rank, REL20, REL60, REL120,
-    High120, VWAP120, BreakoutPct, VWAPDev
+    High120, VWAP120, SMA200, BreakoutPct, VWAPDev, DistToSMA200
     """
     # 計算 SPY 的各窗口報酬率
     spy_close = spy_data['Close'].astype(float).values
@@ -521,52 +522,54 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
     return df_results[output_cols]
 
 
-    def filter_categories(df: pd.DataFrame, breakout_threshold: float = 5.0) -> dict:
-        """依照四個條件分類"""
-        if df.empty:
-            return {
-                'category1_20R60R_75_89_120R_lt80': df.copy(),
-                'category2_20R60R_ge90_120R_lt80': df.copy(),
-                'category3_rank_ge90': df.copy(),
-                'category4_near_sma200': df.copy(),
-            }
+# ========== 以下是顶层函数（已修正缩进） ==========
 
-        # 1. 20R和60R同時在75-89但120R在80以下
-        cat1 = df[
-            (df['20R'] >= 75) & (df['20R'] <= 89) &
-            (df['60R'] >= 75) & (df['60R'] <= 89) &
-            (df['120R'] < 80)
-        ].copy()
-
-        # 2. 20R和60R同時在90以上但120R在80以下
-        cat2 = df[
-            (df['20R'] >= 90) &
-            (df['60R'] >= 90) &
-            (df['120R'] < 80)
-        ].copy()
-
-        # 3. 總Rank >= 90
-        cat3 = df[df['Rank'] >= 90].copy()
-
-        # 都按 Rank 從高到低排序
-        for cat in [cat1, cat2, cat3]:
-            cat.sort_values('Rank', ascending=False, inplace=True)
-
-        # 4. 貼近 200日均線 / 籌碼密集：從所有三類候選中篩選
-        # 條件：價格在 200日均線之上、按距離 200日均線升序（越接近越前）、VWAPDev 升序（越接近 VWAP 越前）
-        all_candidates = pd.concat([cat1, cat2, cat3]).drop_duplicates(subset=['Symbol'])
-        cat4 = all_candidates[
-            (all_candidates['DistToSMA200'] > 0)  # 價格在 200日均線之上
-        ].copy()
-        # 排序：先按距離 200日均線升序（越接近越前），再按 VWAPDev 升序
-        cat4 = cat4.sort_values(['DistToSMA200', 'VWAPDev'], ascending=[True, True])
-
+def filter_categories(df: pd.DataFrame, breakout_threshold: float = 5.0) -> dict:
+    """依照四個條件分類"""
+    if df.empty:
         return {
-            'category1_20R60R_75_89_120R_lt80': cat1,
-            'category2_20R60R_ge90_120R_lt80': cat2,
-            'category3_rank_ge90': cat3,
-            'category4_near_sma200': cat4,
+            'category1_20R60R_75_89_120R_lt80': df.copy(),
+            'category2_20R60R_ge90_120R_lt80': df.copy(),
+            'category3_rank_ge90': df.copy(),
+            'category4_near_sma200': df.copy(),
         }
+
+    # 1. 20R和60R同時在75-89但120R在80以下
+    cat1 = df[
+        (df['20R'] >= 75) & (df['20R'] <= 89) &
+        (df['60R'] >= 75) & (df['60R'] <= 89) &
+        (df['120R'] < 80)
+    ].copy()
+
+    # 2. 20R和60R同時在90以上但120R在80以下
+    cat2 = df[
+        (df['20R'] >= 90) &
+        (df['60R'] >= 90) &
+        (df['120R'] < 80)
+    ].copy()
+
+    # 3. 總Rank >= 90
+    cat3 = df[df['Rank'] >= 90].copy()
+
+    # 都按 Rank 從高到低排序
+    for cat in [cat1, cat2, cat3]:
+        cat.sort_values('Rank', ascending=False, inplace=True)
+
+    # 4. 貼近 200日均線 / 籌碼密集：從所有三類候選中篩選
+    # 條件：價格在 200日均線之上、按距離 200日均線升序（越接近越前）、VWAPDev 升序（越接近 VWAP 越前）
+    all_candidates = pd.concat([cat1, cat2, cat3]).drop_duplicates(subset=['Symbol'])
+    cat4 = all_candidates[
+        (all_candidates['DistToSMA200'] > 0)  # 價格在 200日均線之上
+    ].copy()
+    # 排序：先按距離 200日均線升序（越接近越前），再按 VWAPDev 升序
+    cat4 = cat4.sort_values(['DistToSMA200', 'VWAPDev'], ascending=[True, True])
+
+    return {
+        'category1_20R60R_75_89_120R_lt80': cat1,
+        'category2_20R60R_ge90_120R_lt80': cat2,
+        'category3_rank_ge90': cat3,
+        'category4_near_sma200': cat4,
+    }
 
 
 def generate_report(categories: dict, scan_info: dict) -> str:
