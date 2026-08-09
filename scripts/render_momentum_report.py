@@ -21,15 +21,15 @@ def render_markdown(json_path: Path, output_path: Path) -> str:
     cat1 = pd.DataFrame(categories.get('category1_20R60R_75_89_120R_lt80', []))
     cat2 = pd.DataFrame(categories.get('category2_20R60R_ge90_120R_lt80', []))
     cat3 = pd.DataFrame(categories.get('category3_rank_ge90', []))
-    cat4 = pd.DataFrame(categories.get('category4_breakout_near', []))
+    cat4 = pd.DataFrame(categories.get('category4_near_sma200', []))
 
     # 確保按 Rank 排序
     for cat in [cat1, cat2, cat3]:
         if len(cat) > 0 and 'Rank' in cat.columns:
             cat.sort_values('Rank', ascending=False, inplace=True)
-    # cat4 按 BreakoutPct 排序
-    if len(cat4) > 0 and 'BreakoutPct' in cat4.columns:
-        cat4.sort_values('BreakoutPct', ascending=True, inplace=True)
+    # cat4 按 DistToSMA200 排序
+    if len(cat4) > 0 and 'DistToSMA200' in cat4.columns:
+        cat4.sort_values('DistToSMA200', ascending=True, inplace=True)
 
     lines = []
     lines.append("📊 **美股動量排名週報**")
@@ -58,14 +58,14 @@ def render_markdown(json_path: Path, output_path: Path) -> str:
     render_category(cat2, "類別 2：20R&60R ≥ 90，但 120R < 80", "🟢")
     render_category(cat3, "類別 3：總 Rank ≥ 90", "🔵")
 
-    # 類別 4：突破平台/筹码密集
-    lines.append(f"## 🚀 突破平台 / 筹码密集區（突破幅度 ≤ 5%） （共 {len(cat4)} 檔）")
+    # 類別 4：貼近 200日均線 / 籌碼密集
+    lines.append(f"## 📈 貼近 200日均線 / 籌碼密集（價格在 SMA200 上方） （共 {len(cat4)} 檔）")
     lines.append("")
     if len(cat4) > 0:
-        lines.append("| 代碼 | 突破幅度 | VWAP偏離 | 20R | 60R | 120R | Rank |")
+        lines.append("| 代碼 | 距SMA200 | VWAP偏離 | 20R | 60R | 120R | Rank |")
         lines.append("|------|---------|---------|-----|-----|------|------|")
         for _, row in cat4.iterrows():
-            lines.append(f"| {row['Symbol']:<6} | {row['BreakoutPct']:>6.2f}% | {row['VWAPDev']:>6.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} |")
+            lines.append(f"| {row['Symbol']:<6} | {row['DistToSMA200']:>6.2f}% | {row['VWAPDev']:>6.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} |")
     else:
         lines.append("*無符合條件標的*")
     lines.append("")
@@ -89,26 +89,26 @@ def render_discord(json_path: Path, output_path: Path) -> dict:
     cat1 = pd.DataFrame(categories.get('category1_20R60R_75_89_120R_lt80', []))
     cat2 = pd.DataFrame(categories.get('category2_20R60R_ge90_120R_lt80', []))
     cat3 = pd.DataFrame(categories.get('category3_rank_ge90', []))
-    cat4 = pd.DataFrame(categories.get('category4_breakout_near', []))
+    cat4 = pd.DataFrame(categories.get('category4_near_sma200', []))
 
     for cat in [cat1, cat2, cat3]:
         if len(cat) > 0 and 'Rank' in cat.columns:
             cat.sort_values('Rank', ascending=False, inplace=True)
-    if len(cat4) > 0 and 'BreakoutPct' in cat4.columns:
-        cat4.sort_values('BreakoutPct', ascending=True, inplace=True)
+    if len(cat4) > 0 and 'DistToSMA200' in cat4.columns:
+        cat4.sort_values('DistToSMA200', ascending=True, inplace=True)
 
-    def format_category(df, title, show_breakout=False):
+    def format_category(df, title, show_sma=False):
         if len(df) == 0:
             return {"name": title, "value": "```\n無符合條件標的\n```", "inline": False}
 
         display_df = df.head(20)
         lines = []
         # 表頭
-        if show_breakout:
-            lines.append(f"{'代碼':<6} | {'突破幅度':>8} | {'VWAP偏離':>8} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
+        if show_sma:
+            lines.append(f"{'代碼':<6} | {'距SMA200':>8} | {'VWAP偏離':>8} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
             lines.append(f"{'------':-<6}-|-{'-'*8:->8}-|-{'-'*8:->8}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
             for _, row in display_df.iterrows():
-                lines.append(f"{row['Symbol']:<6} | {row['BreakoutPct']:>7.2f}% | {row['VWAPDev']:>7.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
+                lines.append(f"{row['Symbol']:<6} | {row['DistToSMA200']:>7.2f}% | {row['VWAPDev']:>7.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
         else:
             lines.append(f"{'代碼':<6} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
             lines.append(f"{'------':-<6}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
@@ -129,7 +129,7 @@ def render_discord(json_path: Path, output_path: Path) -> dict:
             format_category(cat1, "底部反轉 1"),
             format_category(cat2, "底部反轉 2"),
             format_category(cat3, "超強勢"),
-            format_category(cat4, "🚀 突破平台/筹码密集（≤5%）", show_breakout=True),
+            format_category(cat4, "📈 貼近 200日均線 / 籌碼密集（SMA200 上方）", show_sma=True),
         ],
         "footer": {"text": "相對 SPY 超額報酬百分位排名 | 非投資建議"},
         "timestamp": datetime.now(timezone.utc).isoformat()
