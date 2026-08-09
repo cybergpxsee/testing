@@ -913,7 +913,7 @@ def main():
         'cat1_count': len(categories['category1_20R60R_75_89_120R_lt80']),
         'cat2_count': len(categories['category2_20R60R_ge90_120R_lt80']),
         'cat3_count': len(categories['category3_rank_ge90']),
-        'cat4_count': len(categories['category4_breakout_near']),
+        'cat4_count': len(categories['category4_near_sma200']),
     }
 
     # 輸出 JSON 給後續處理
