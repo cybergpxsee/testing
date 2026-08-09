@@ -2,11 +2,11 @@
 """
 美股動量排名掃描器
 計算 20R/60R/120R/Rank 並分四類輸出：
-1. 20R和60R同時在75-89但120R在80以下
-2. 20R和60R同時在90以上但120R在80以下
-3. 總Rank >= 90
-4. 底部接近候選：從上述三類中篩選出 proximity <= 閾值的股票
-排序：類別 1/2/3 按 Rank 從高到低；類別 4 按 proximity 從低到高
+1. 20R和60R同時在75-89但120R在80以下（底部反轉 1）
+2. 20R和60R同時在90以上但120R在80以下（底部反轉 2）
+3. 總Rank >= 90（超強勢）
+4. 突破平台/筹码密集：從上述三類中篩選出剛突破平台且接近筹码密集區的股票
+排序：類別 1/2/3 按 Rank 從高到低；類別 4 按 BreakoutPct 升序（越貼近越前）
 """
 
 import argparse
@@ -416,7 +416,8 @@ def download_bars(symbols, period, stderr_path, batch=200, phase='DOWNLOAD'):
 def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.DataFrame:
     """
     計算所有標的的動量排名
-    Returns DataFrame with columns: Symbol, Price, 1D%, 20R, 60R, 120R, Rank, REL20, REL60, REL120
+    Returns DataFrame with columns: Symbol, Price, 1D%, 20R, 60R, 120R, Rank, REL20, REL60, REL120,
+    High120, VWAP120, BreakoutPct, VWAPDev
     """
     # 計算 SPY 的各窗口報酬率
     spy_close = spy_data['Close'].astype(float).values
@@ -436,6 +437,8 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
         if len(df) < max(MOMENTUM_WINDOWS) + 5:
             continue
         close = df['Close'].astype(float).values
+        high = df['High'].astype(float).values
+        volume = df['Volume'].astype(float).values
         if len(close) < max(MOMENTUM_WINDOWS) + 5:
             continue
 
@@ -456,6 +459,20 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
                 returns[window] = 0.0
                 excess_returns[window] = 0.0
 
+        # 計算 120日最高價、VWAP、突破幅度、VWAP偏離度
+        lookback_120 = min(120, len(close))
+        high_120 = float(high[-lookback_120:].max())
+        vwap_120 = float((close[-lookback_120:] * volume[-lookback_120:]).sum() / volume[-lookback_120:].sum())
+        
+        # 突破幅度：只有當收盤價 > 120日最高價時才算突破
+        if price_today > high_120:
+            breakout_pct = (price_today / high_120 - 1.0) * 100.0
+        else:
+            breakout_pct = 0.0  # 未突破，設為 0
+        
+        # VWAP偏離度
+        vwap_dev = abs(price_today / vwap_120 - 1.0) * 100.0
+
         results.append({
             'Symbol': sym,
             'Price': round(price_today, 2),
@@ -466,6 +483,10 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
             'excess_20': excess_returns[20],
             'excess_60': excess_returns[60],
             'excess_120': excess_returns[120],
+            'High120': round(high_120, 2),
+            'VWAP120': round(vwap_120, 2),
+            'BreakoutPct': round(breakout_pct, 2),
+            'VWAPDev': round(vwap_dev, 2),
         })
 
     if not results:
@@ -486,45 +507,19 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
     # 排序：Rank 從高到低
     df_results = df_results.sort_values('Rank', ascending=False).reset_index(drop=True)
 
-    # 只保留需要的欄位
-    output_cols = ['Symbol', 'Price', '1D%', '20R', '60R', '120R', 'Rank', 'REL20', 'REL60', 'REL120']
+    # 只保留需要的欄位（包含新增的突破/筹码欄位）
+    output_cols = ['Symbol', 'Price', '1D%', '20R', '60R', '120R', 'Rank', 'REL20', 'REL60', 'REL120', 'High120', 'VWAP120', 'BreakoutPct', 'VWAPDev']
     return df_results[output_cols]
 
 
-def add_proximity_metrics(momentum_df: pd.DataFrame, price_data: dict, lookback_days: int = 120) -> pd.DataFrame:
-    """
-    為 momentum_df 添加底部接近度列 'proximity'（值越小越接近底部）
-    proximity = (close - low_N) / close
-    """
-    if momentum_df.empty:
-        return momentum_df
-
-    proximity_list = []
-    for symbol in momentum_df['Symbol']:
-        df = price_data.get(symbol)
-        if df is None or len(df) < lookback_days:
-            proximity_list.append(1.0)  # 數據不足，設為最大值
-            continue
-        close = df['Close'].iloc[-1]
-        low_n = df['Close'].tail(lookback_days).min()
-        if close > 0:
-            prox = (close - low_n) / close
-        else:
-            prox = 1.0
-        proximity_list.append(round(prox, 4))
-
-    momentum_df['proximity'] = proximity_list
-    return momentum_df
-
-
-def filter_categories(df: pd.DataFrame, proximity_threshold: float = 0.05) -> dict:
+def filter_categories(df: pd.DataFrame, breakout_threshold: float = 5.0) -> dict:
     """依照四個條件分類"""
     if df.empty:
         return {
             'category1_20R60R_75_89_120R_lt80': df.copy(),
             'category2_20R60R_ge90_120R_lt80': df.copy(),
             'category3_rank_ge90': df.copy(),
-            'category4_bottom_proximity': df.copy(),
+            'category4_breakout_near': df.copy(),
         }
 
     # 1. 20R和60R同時在75-89但120R在80以下
@@ -548,16 +543,20 @@ def filter_categories(df: pd.DataFrame, proximity_threshold: float = 0.05) -> di
     for cat in [cat1, cat2, cat3]:
         cat.sort_values('Rank', ascending=False, inplace=True)
 
-    # 4. 底部接近候選：從所有三類候選中，篩選出 proximity 低於閾值的股票
+    # 4. 突破平台/筹码密集：從所有三類候選中，篩選出 0 < BreakoutPct <= 閾值 的股票
     all_candidates = pd.concat([cat1, cat2, cat3]).drop_duplicates(subset=['Symbol'])
-    cat4 = all_candidates[all_candidates['proximity'] <= proximity_threshold].copy()
-    cat4 = cat4.sort_values('proximity', ascending=True)  # 越接近底部越靠前
+    cat4 = all_candidates[
+        (all_candidates['BreakoutPct'] > 0) & 
+        (all_candidates['BreakoutPct'] <= breakout_threshold)
+    ].copy()
+    # 按突破幅度升序排序（越貼近越前）
+    cat4 = cat4.sort_values('BreakoutPct', ascending=True)
 
     return {
         'category1_20R60R_75_89_120R_lt80': cat1,
         'category2_20R60R_ge90_120R_lt80': cat2,
         'category3_rank_ge90': cat3,
-        'category4_bottom_proximity': cat4,
+        'category4_breakout_near': cat4,
     }
 
 
@@ -614,15 +613,15 @@ def generate_report(categories: dict, scan_info: dict) -> str:
         lines.append("*無符合條件標的*")
     lines.append("")
 
-    # 類別 4：底部接近候選
-    cat4 = categories.get('category4_bottom_proximity', pd.DataFrame())
-    lines.append(f"## 📉 底部接近候選（距120日最低 < 5%） （共 {len(cat4)} 檔）")
+    # 類別 4：突破平台/筹码密集
+    cat4 = categories.get('category4_breakout_near', pd.DataFrame())
+    lines.append(f"## 🚀 突破平台 / 筹码密集區（突破幅度 ≤ 5%） （共 {len(cat4)} 檔）")
     lines.append("")
     if len(cat4) > 0:
-        lines.append("| 代碼 | 20R | 60R | 120R | Rank | 底部接近度 |")
-        lines.append("|------|-----|-----|------|------|----------|")
+        lines.append("| 代碼 | 突破幅度 | VWAP偏離 | 20R | 60R | 120R | Rank |")
+        lines.append("|------|---------|---------|-----|-----|------|------|")
         for _, row in cat4.iterrows():
-            lines.append(f"| {row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} | {row['proximity']:.2%} |")
+            lines.append(f"| {row['Symbol']:<6} | {row['BreakoutPct']:>6.2f}% | {row['VWAPDev']:>6.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} |")
     else:
         lines.append("*無符合條件標的*")
     lines.append("")
@@ -639,20 +638,20 @@ def generate_discord_embed(categories: dict, scan_info: dict) -> dict:
     cat1 = categories['category1_20R60R_75_89_120R_lt80']
     cat2 = categories['category2_20R60R_ge90_120R_lt80']
     cat3 = categories['category3_rank_ge90']
-    cat4 = categories.get('category4_bottom_proximity', pd.DataFrame())
+    cat4 = categories.get('category4_breakout_near', pd.DataFrame())
 
-    def format_category(df, title, show_proximity=False):
+    def format_category(df, title, show_breakout=False):
         if len(df) == 0:
             return {"name": title, "value": "```\n無符合條件標的\n```", "inline": False}
 
         display_df = df.head(20)
         lines = []
         # 表頭
-        if show_proximity:
-            lines.append(f"{'代碼':<6} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5} | {'接近度':>6}")
-            lines.append(f"{'------':-<6}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}-|-{'-'*6:->6}")
+        if show_breakout:
+            lines.append(f"{'代碼':<6} | {'突破幅度':>8} | {'VWAP偏離':>8} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
+            lines.append(f"{'------':-<6}-|-{'-'*8:->8}-|-{'-'*8:->8}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
             for _, row in display_df.iterrows():
-                lines.append(f"{row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} | {row['proximity']:.2%}")
+                lines.append(f"{row['Symbol']:<6} | {row['BreakoutPct']:>7.2f}% | {row['VWAPDev']:>7.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
         else:
             lines.append(f"{'代碼':<6} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
             lines.append(f"{'------':-<6}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
@@ -673,7 +672,7 @@ def generate_discord_embed(categories: dict, scan_info: dict) -> dict:
             format_category(cat1, "底部反轉 1"),
             format_category(cat2, "底部反轉 2"),
             format_category(cat3, "超強勢"),
-            format_category(cat4, "📉 底部接近候選（<5%）", show_proximity=True),
+            format_category(cat4, "🚀 突破平台/筹码密集（≤5%）", show_breakout=True),
         ],
         "footer": {"text": "相對 SPY 超額報酬百分位排名 | 非投資建議"},
         "timestamp": datetime.now(timezone.utc).isoformat()
@@ -725,7 +724,7 @@ def main():
     parser.add_argument('--stage2-batch', type=int, default=int(os.environ.get('MOMENTUM_SCAN_STAGE2_BATCH', '100')))
     parser.add_argument('--stage2-period', default=os.environ.get('MOMENTUM_SCAN_STAGE2_PERIOD', '1y'))
     parser.add_argument('--spy-period', default=os.environ.get('MOMENTUM_SCAN_SPY_PERIOD', '2y'), help='SPY dedicated download period (e.g., 2y)')
-    parser.add_argument('--proximity-threshold', type=float, default=float(os.environ.get('MOMENTUM_PROXIMITY_THRESHOLD', '0.05')), help='底部接近度阈值，默认5%')
+    parser.add_argument('--breakout-threshold', type=float, default=float(os.environ.get('MOMENTUM_BREAKOUT_THRESHOLD', '5.0')), help='突破幅度上限（百分比），默认5%')
     args = parser.parse_args()
 
     stderr_path = args.stderr_path
@@ -891,11 +890,8 @@ def main():
     momentum_df = calculate_momentum_ranks(scan_data, spy_data)
     append_log(stderr_path, f"MOMENTUM_CALC_DONE ranked={len(momentum_df)}")
 
-    # 添加底部接近度指標（使用120日最低價）
-    momentum_df = add_proximity_metrics(momentum_df, all_price_data, lookback_days=120)
-
     # 5. 分類
-    categories = filter_categories(momentum_df, proximity_threshold=args.proximity_threshold)
+    categories = filter_categories(momentum_df, breakout_threshold=args.breakout_threshold)
 
     # 6. 準備輸出
     scan_info = {
@@ -908,7 +904,7 @@ def main():
         'cat1_count': len(categories['category1_20R60R_75_89_120R_lt80']),
         'cat2_count': len(categories['category2_20R60R_ge90_120R_lt80']),
         'cat3_count': len(categories['category3_rank_ge90']),
-        'cat4_count': len(categories['category4_bottom_proximity']),
+        'cat4_count': len(categories['category4_breakout_near']),
     }
 
     # 輸出 JSON 給後續處理
