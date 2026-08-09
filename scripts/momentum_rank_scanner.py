@@ -469,6 +469,15 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
         lookback_200 = min(200, len(close))
         sma_200 = float(close[-lookback_200:].mean())
         
+        # 計算 200日均線斜率 (線性回歸斜率，近 20 日)
+        slope_lookback = min(20, lookback_200)
+        if slope_lookback >= 2:
+            x = np.arange(slope_lookback)
+            y = close[-slope_lookback:]
+            slope_200 = float(np.polyfit(x, y, 1)[0])  # 斜率
+        else:
+            slope_200 = 0.0
+        
         # 突破幅度：只有當收盤價 > 120日最高價時才算突破
         if price_today > high_120:
             breakout_pct = (price_today / high_120 - 1.0) * 100.0
@@ -494,6 +503,7 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
             'High120': round(high_120, 2),
             'VWAP120': round(vwap_120, 2),
             'SMA200': round(sma_200, 2),
+            'SMA200Slope': round(slope_200, 6),
             'BreakoutPct': round(breakout_pct, 2),
             'VWAPDev': round(vwap_dev, 2),
             'DistToSMA200': round(dist_to_sma200, 2),
@@ -518,7 +528,7 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
     df_results = df_results.sort_values('Rank', ascending=False).reset_index(drop=True)
 
     # 只保留需要的欄位（包含新增的突破/籌碼/均線欄位）
-    output_cols = ['Symbol', 'Price', '1D%', '20R', '60R', '120R', 'Rank', 'REL20', 'REL60', 'REL120', 'High120', 'VWAP120', 'SMA200', 'BreakoutPct', 'VWAPDev', 'DistToSMA200']
+    output_cols = ['Symbol', 'Price', '1D%', '20R', '60R', '120R', 'Rank', 'REL20', 'REL60', 'REL120', 'High120', 'VWAP120', 'SMA200', 'SMA200Slope', 'BreakoutPct', 'VWAPDev', 'DistToSMA200']
     return df_results[output_cols]
 
 
@@ -556,10 +566,11 @@ def filter_categories(df: pd.DataFrame, breakout_threshold: float = 5.0) -> dict
         cat.sort_values('Rank', ascending=False, inplace=True)
 
     # 4. 貼近 200日均線 / 籌碼密集：從所有三類候選中篩選
-    # 條件：價格在 200日均線之上、按距離 200日均線升序（越接近越前）、VWAPDev 升序（越接近 VWAP 越前）
+    # 條件：價格在 200日均線之上、200日均線斜率為正、按距離 200日均線升序（越接近越前）、VWAPDev 升序（越接近 VWAP 越前）
     all_candidates = pd.concat([cat1, cat2, cat3]).drop_duplicates(subset=['Symbol'])
     cat4 = all_candidates[
-        (all_candidates['DistToSMA200'] > 0)  # 價格在 200日均線之上
+        (all_candidates['DistToSMA200'] > 0) &  # 價格在 200日均線之上
+        (all_candidates['SMA200Slope'] > 0)     # 200日均線斜率為正
     ].copy()
     # 排序：先按距離 200日均線升序（越接近越前），再按 VWAPDev 升序
     cat4 = cat4.sort_values(['DistToSMA200', 'VWAPDev'], ascending=[True, True])
@@ -627,13 +638,13 @@ def generate_report(categories: dict, scan_info: dict) -> str:
 
     # 類別 4：貼近 200日均線 / 籌碼密集
     cat4 = categories.get('category4_near_sma200', pd.DataFrame())
-    lines.append(f"## 📈 貼近 200日均線 / 籌碼密集（價格在 SMA200 上方） （共 {len(cat4)} 檔）")
+    lines.append(f"## 📈 貼近 200日均線 / 籌碼密集（價格在 SMA200 上方，斜率為正） （共 {len(cat4)} 檔）")
     lines.append("")
     if len(cat4) > 0:
-        lines.append("| 代碼 | 距SMA200 | VWAP偏離 | 20R | 60R | 120R | Rank |")
-        lines.append("|------|---------|---------|-----|-----|------|------|")
+        lines.append("| 代碼 | 距SMA200 | SMA200斜率 | VWAP偏離 | 20R | 60R | 120R | Rank |")
+        lines.append("|------|---------|-----------|---------|-----|-----|------|------|")
         for _, row in cat4.iterrows():
-            lines.append(f"| {row['Symbol']:<6} | {row['DistToSMA200']:>6.2f}% | {row['VWAPDev']:>6.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} |")
+            lines.append(f"| {row['Symbol']:<6} | {row['DistToSMA200']:>6.2f}% | {row['SMA200Slope']:>+6.4f} | {row['VWAPDev']:>6.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} |")
     else:
         lines.append("*無符合條件標的*")
     lines.append("")
@@ -662,10 +673,10 @@ def generate_discord_embed(categories: dict, scan_info: dict) -> dict:
         lines = []
         # 表頭
         if show_sma:
-            lines.append(f"{'代碼':<6} | {'距SMA200':>8} | {'VWAP偏離':>8} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
-            lines.append(f"{'------':-<6}-|-{'-'*8:->8}-|-{'-'*8:->8}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
+            lines.append(f"{'代碼':<6} | {'距SMA200':>8} | {'SMA200斜率':>8} | {'VWAP偏離':>8} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
+            lines.append(f"{'------':-<6}-|-{'-'*8:->8}-|-{'-'*8:->8}-|-{'-'*8:->8}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
             for _, row in display_df.iterrows():
-                lines.append(f"{row['Symbol']:<6} | {row['DistToSMA200']:>7.2f}% | {row['VWAPDev']:>7.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
+                lines.append(f"{row['Symbol']:<6} | {row['DistToSMA200']:>7.2f}% | {row['SMA200Slope']:>+7.4f} | {row['VWAPDev']:>7.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
         else:
             lines.append(f"{'代碼':<6} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
             lines.append(f"{'------':-<6}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")

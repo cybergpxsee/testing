@@ -59,13 +59,13 @@ def render_markdown(json_path: Path, output_path: Path) -> str:
     render_category(cat3, "類別 3：總 Rank ≥ 90", "🔵")
 
     # 類別 4：貼近 200日均線 / 籌碼密集
-    lines.append(f"## 📈 貼近 200日均線 / 籌碼密集（價格在 SMA200 上方） （共 {len(cat4)} 檔）")
+    lines.append(f"## 📈 貼近 200日均線 / 籌碼密集（價格在 SMA200 上方，斜率為正） （共 {len(cat4)} 檔）")
     lines.append("")
     if len(cat4) > 0:
-        lines.append("| 代碼 | 距SMA200 | VWAP偏離 | 20R | 60R | 120R | Rank |")
-        lines.append("|------|---------|---------|-----|-----|------|------|")
+        lines.append("| 代碼 | 距SMA200 | SMA200斜率 | VWAP偏離 | 20R | 60R | 120R | Rank |")
+        lines.append("|------|---------|-----------|---------|-----|-----|------|------|")
         for _, row in cat4.iterrows():
-            lines.append(f"| {row['Symbol']:<6} | {row['DistToSMA200']:>6.2f}% | {row['VWAPDev']:>6.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} |")
+            lines.append(f"| {row['Symbol']:<6} | {row['DistToSMA200']:>6.2f}% | {row['SMA200Slope']:>+6.4f} | {row['VWAPDev']:>6.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f} |")
     else:
         lines.append("*無符合條件標的*")
     lines.append("")
@@ -107,10 +107,10 @@ def render_discord(json_path: Path, output_path: Path) -> dict:
         lines = []
         # 表頭
         if show_sma:
-            lines.append(f"{'代碼':<6} | {'距SMA200':>8} | {'VWAP偏離':>8} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
-            lines.append(f"{'------':-<6}-|-{'-'*8:->8}-|-{'-'*8:->8}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
+            lines.append(f"{'代碼':<6} | {'距SMA200':>8} | {'SMA200斜率':>8} | {'VWAP偏離':>8} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
+            lines.append(f"{'------':-<6}-|-{'-'*8:->8}-|-{'-'*8:->8}-|-{'-'*8:->8}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
             for _, row in display_df.iterrows():
-                lines.append(f"{row['Symbol']:<6} | {row['DistToSMA200']:>7.2f}% | {row['VWAPDev']:>7.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
+                lines.append(f"{row['Symbol']:<6} | {row['DistToSMA200']:>7.2f}% | {row['SMA200Slope']:>+7.4f} | {row['VWAPDev']:>7.2f}% | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
         else:
             lines.append(f"{'代碼':<6} | {'20R':>3} | {'60R':>3} | {'120R':>4} | {'Rank':>5}")
             lines.append(f"{'------':-<6}-|-{'-'*3:->3}-|-{'-'*3:->3}-|-{'-'*4:->4}-|-{'-'*5:->5}")
@@ -136,7 +136,7 @@ def render_discord(json_path: Path, output_path: Path) -> dict:
             format_category(cat1, "底部反轉 1"),
             format_category(cat2, "底部反轉 2"),
             format_category(cat3, "超強勢"),
-            format_category(cat4, "📈 貼近 200日均線 / 籌碼密集（SMA200 上方）", show_sma=True),
+            format_category(cat4, "📈 貼近 200日均線 / 籌碼密集（SMA200 上方，斜率為正）", show_sma=True),
         ],
         "footer": {"text": "相對 SPY 超額報酬百分位排名 | 非投資建議"},
         "timestamp": datetime.now(timezone.utc).isoformat()
