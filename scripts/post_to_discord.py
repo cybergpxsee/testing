@@ -40,6 +40,9 @@ def post_discord(webhook: str, payload: dict) -> None:
                     continue
                 elif resp.status >= 400:
                     print(f"Discord webhook error: status={resp.status}, body={body}")
+                    # 額外調試信息：打印發送的 payload 和響應頭
+                    print(f"Discord webhook request payload size: {len(data)} bytes")
+                    print(f"Discord webhook response headers: {dict(resp.headers)}")
                     if attempt < MAX_RETRIES:
                         time.sleep(RETRY_DELAY * attempt)
                         continue

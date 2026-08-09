@@ -656,7 +656,9 @@ def generate_discord_embed(categories: dict, scan_info: dict) -> dict:
         if len(df) == 0:
             return {"name": title, "value": "```\n無符合條件標的\n```", "inline": False}
 
-        display_df = df.head(20)
+        # 限制最多顯示 10 只
+        MAX_ROWS = 10
+        display_df = df.head(MAX_ROWS)
         lines = []
         # 表頭
         if show_sma:
@@ -671,8 +673,13 @@ def generate_discord_embed(categories: dict, scan_info: dict) -> dict:
                 lines.append(f"{row['Symbol']:<6} | {int(row['20R']):>3} | {int(row['60R']):>3} | {int(row['120R']):>4} | {row['Rank']:>5.1f}")
 
         value = "```\n" + "\n".join(lines) + "\n```"
-        if len(df) > 20:
-            value += f"\n... 共 {len(df)} 檔，僅顯示前 20"
+        if len(df) > MAX_ROWS:
+            value += f"\n... 共 {len(df)} 檔，僅顯示前 {MAX_ROWS}"
+
+        # 強制截斷，確保不超過 Discord 限制（1024 字符，留一些餘量）
+        MAX_VALUE_LEN = 1000
+        if len(value) > MAX_VALUE_LEN:
+            value = value[:MAX_VALUE_LEN-20] + "\n... (截斷)"
 
         return {"name": title, "value": value, "inline": False}
 
