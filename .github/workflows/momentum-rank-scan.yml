@@ -38,6 +38,10 @@ on:
         description: 'Bottom proximity threshold (e.g., 0.05 for 5%)'
         required: false
         default: '0.05'
+      breakout_threshold:
+        description: 'Breakout percentage threshold (e.g., 5.0 for 5%)'
+        required: false
+        default: '5.0'
 
 jobs:
   scan:
@@ -53,6 +57,7 @@ jobs:
       MOMENTUM_SCAN_SPY_PERIOD: ${{ github.event.inputs.spy_period || '2y' }}
       MOMENTUM_SCAN_SHARDS: ${{ github.event.inputs.shards || '4' }}
       MOMENTUM_PROXIMITY_THRESHOLD: ${{ github.event.inputs.proximity_threshold || '0.05' }}
+      MOMENTUM_BREAKOUT_THRESHOLD: ${{ github.event.inputs.breakout_threshold || '5.0' }}
       MOMENTUM_CACHE_KEEP_DAYS: '365'
     steps:
       - name: Checkout current repository (source code)
