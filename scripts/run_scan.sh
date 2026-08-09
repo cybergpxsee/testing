@@ -9,11 +9,11 @@ mkdir -p "$OUT_DIR"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="$OUT_DIR/$STAMP"
 ARTIFACT_ROOT="$RUN_DIR/artifacts"
-JSON_PATH="$RUN_DIR/pullback_scan.json"
-MD_PATH="$RUN_DIR/pullback_scan.md"
+JSON_PATH="$RUN_DIR/consolidation_scan.json"
+MD_PATH="$RUN_DIR/consolidation_scan.md"
 COMBINED_STAGE1="$RUN_DIR/liquid_symbols.json"
 FINAL_DIR="$RUN_DIR/final"
-COMBINED_STDERR="$RUN_DIR/pullback_scan.stderr.log"
+COMBINED_STDERR="$RUN_DIR/consolidation_scan.stderr.log"
 mkdir -p "$ARTIFACT_ROOT" "$FINAL_DIR"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
@@ -31,13 +31,13 @@ if [[ ! -f "$NASDAQ_LISTED_CACHE" || ! -f "$OTHER_LISTED_CACHE" || ! -f "$US_SYM
   "$PYTHON_BIN" "$ROOT_DIR/scripts/update_symbol_universe.py"
 fi
 
-UNIVERSE_SHARDS="${HERMES_SCAN_UNIVERSE_SHARDS:-${HERMES_SCAN_SHARDS:-18}}"
+UNIVERSE_SHARDS="${HERMES_SCAN_UNIVERSE_SHARDS:-${HERMES_SCAN_SHARDS:-12}}"
 WORKER_CONCURRENCY="${HERMES_SCAN_WORKER_CONCURRENCY:-6}"
 PER_WORKER_STAGE2_SHARDS="${HERMES_SCAN_STAGE2_SHARDS_PER_WORKER:-1}"
-STAGE1_BATCH="${HERMES_SCAN_STAGE1_BATCH:-120}"
-STAGE2_BATCH="${HERMES_SCAN_STAGE2_BATCH:-100}"
+STAGE1_BATCH="${HERMES_SCAN_STAGE1_BATCH:-90}"
+STAGE2_BATCH="${HERMES_SCAN_STAGE2_BATCH:-120}"
 STAGE1_PERIOD="${HERMES_SCAN_STAGE1_PERIOD:-1mo}"
-STAGE2_PERIOD="${HERMES_SCAN_STAGE2_PERIOD:-1y}"
+STAGE2_PERIOD="${HERMES_SCAN_STAGE2_PERIOD:-3y}"
 WORKER_STAGGER="${HERMES_SCAN_WORKER_STAGGER:-0.5}"
 MAX_SYMBOLS="${HERMES_SCAN_MAX_SYMBOLS:-}"
 
@@ -135,9 +135,8 @@ for ((i=0; i<WORKER_TOTAL; i++)); do
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 root = Path(os.environ['ROOT_DIR'])
 sys.path.insert(0, str(root))
@@ -147,7 +146,7 @@ worker_index = int(os.environ['WORKER_INDEX'])
 worker_total = int(os.environ.get('WORKER_TOTAL', '1'))
 worker_dir = Path(os.environ['WORKER_DIR'])
 symbols_file = Path(os.environ['SYMBOLS_FILE'])
-stderr_path = worker_dir / 'pullback_scan.stderr.log'
+stderr_path = worker_dir / 'consolidation_scan.stderr.log'
 original_symbols = [line.strip() for line in symbols_file.read_text(encoding='utf-8').splitlines() if line.strip()]
 mapped = {scan.yahoo_symbol(sym): sym for sym in original_symbols}
 yahoo_symbols = list(mapped.keys())
@@ -156,70 +155,131 @@ stage1_batch = int(os.environ['STAGE1_BATCH'])
 stage2_batch = int(os.environ['STAGE2_BATCH'])
 per_worker_stage2_shards = max(1, int(os.environ['PER_WORKER_STAGE2_SHARDS']))
 open(stderr_path, 'w').close()
+
+# 缓存实例
+cache_dir = Path(os.environ['ARTIFACT_ROOT']) / '.consolidation_cache'
+cache = scan.ConsolidationCache(cache_dir, str(stderr_path))
+
 scan.append_log(str(stderr_path), f"WORKER_START worker={worker_index}/{worker_total} universe={len(yahoo_symbols)} symbols_file={symbols_file.name}")
-stage1, miss1 = scan.download_bars(yahoo_symbols, stage1_period, str(stderr_path), batch=stage1_batch, phase=f'WORKER_{worker_index:02d}_STAGE1')
-liquid = []
-for ys, df in stage1.items():
-    x = df.dropna(subset=['Close', 'Volume']).reset_index(drop=True)
-    if len(x) == 0:
-        continue
-    avg_dollar_vol_20d = scan.trailing_avg_dollar_volume(x, len(x) - 1, days=20)
-    if avg_dollar_vol_20d is not None and avg_dollar_vol_20d >= 20_000_000:
-        liquid.append(ys)
+
+# 跳过 stage1，直接使用所有符号作为 liquid
+liquid = yahoo_symbols
 stage1_summary = {
     'generated_at_utc': datetime.now(timezone.utc).isoformat(),
     'worker': worker_index,
     'worker_total': worker_total,
     'universe_total': len(yahoo_symbols),
     'liquid_count': len(liquid),
-    'stage1_misses': len(miss1),
+    'stage1_misses': 0,
     'liquid_symbols': liquid,
-    'universe_source': 'local_cache',
-    'stage1_period': stage1_period,
+    'universe_source': 'shared_cache',
+    'stage1_period': 'skipped',
     'stage1_batch': stage1_batch,
     'stage2_batch': stage2_batch,
     'stage2_shards_per_worker': per_worker_stage2_shards,
     'symbols_file': str(symbols_file),
 }
 (worker_dir / 'worker_stage1.json').write_text(json.dumps(stage1_summary, ensure_ascii=False, indent=2), encoding='utf-8')
-scan.append_log(str(stderr_path), f"WORKER_STAGE1_DONE worker={worker_index}/{worker_total} universe={len(yahoo_symbols)} liquid={len(liquid)} misses={len(miss1)}")
+scan.append_log(str(stderr_path), f"WORKER_STAGE1_DONE worker={worker_index}/{worker_total} universe={len(yahoo_symbols)} liquid={len(liquid)} misses=0")
+
 results = []
-long_count = 0
-short_count = 0
+consolidating_count = 0
+breaking_out_count = 0
 deep_scan_count = 0
 miss2 = set()
 shard_summaries = []
-for local_shard_idx, shard_symbols in enumerate(scan.split_into_shards(liquid, per_worker_stage2_shards), start=1):
-    scan.append_log(str(stderr_path), f"WORKER_STAGE2_SHARD_START worker={worker_index}/{worker_total} shard={local_shard_idx}/{per_worker_stage2_shards} symbols={len(shard_symbols)}")
-    stage2, shard_miss = scan.download_bars(shard_symbols, '1y', str(stderr_path), batch=stage2_batch, phase=f'WORKER_{worker_index:02d}_STAGE2_SHARD_{local_shard_idx:02d}')
-    shard_results, shard_long, shard_short = scan.scan_stage2_dataset(stage2, mapped, str(stderr_path))
-    deep_scan_count += len(stage2)
-    miss2.update(shard_miss)
-    results.extend(shard_results)
-    long_count += shard_long
-    short_count += shard_short
-    shard_summary = {
-        'shard': local_shard_idx,
-        'input_symbols': len(shard_symbols),
-        'downloaded_symbols': len(stage2),
-        'misses': len(shard_miss),
-        'candidates': len(shard_results),
-        'long_candidates': shard_long,
-        'short_candidates': shard_short,
-    }
-    shard_summaries.append(shard_summary)
-    shard_path = worker_dir / f'shard_{local_shard_idx:02d}.json'
-    shard_path.write_text(
-        json.dumps({
-            'generated_at_utc': datetime.now(timezone.utc).isoformat(),
-            'summary': shard_summary,
-            'deep_scan_count': len(stage2),
-            'results': shard_results,
-            'miss_symbols': sorted(list(shard_miss)),
-        }, ensure_ascii=False, indent=2, default=str),
-        encoding='utf-8',
+
+# 计算增量下载日期：过去7天
+today = datetime.now(timezone.utc).date()
+start_date = (today - timedelta(days=7)).strftime('%Y-%m-%d')
+end_date = today.strftime('%Y-%m-%d')
+
+# 分组：有缓存 vs 无缓存
+cached_symbols = []
+uncached_symbols = []
+for ys in liquid:
+    if cache.get_last_date(ys) is not None:
+        cached_symbols.append(ys)
+    else:
+        uncached_symbols.append(ys)
+
+# 下载增量数据（有缓存的符号）
+if cached_symbols:
+    scan.append_log(str(stderr_path), f"WORKER_INCR_DOWNLOAD worker={worker_index} symbols={len(cached_symbols)} start={start_date} end={end_date}")
+    stage2_inc, miss_inc = scan.download_bars(
+        cached_symbols,
+        period=None,
+        stderr_path=str(stderr_path),
+        batch=stage2_batch,
+        interval='1wk',
+        phase=f'WORKER_{worker_index:02d}_INCR',
+        start_date=start_date,
+        end_date=end_date
     )
-    scan.append_log(str(stderr_path), f"WORKER_STAGE2_SHARD_DONE worker={worker_index}/{worker_total} shard={local_shard_idx}/{per_worker_stage2_shards} downloaded={len(stage2)} misses={len(shard_miss)} candidates={len(shard_results)}")
+    # 合并到缓存
+    for ys, df in stage2_inc.items():
+        if ys not in miss_inc:
+            df_merged = cache.merge_incremental(ys, df)
+            cache.put(ys, df_merged)
+    miss_set = set(miss_inc)
+else:
+    miss_set = set()
+
+# 下载完整数据（无缓存的符号）
+if uncached_symbols:
+    scan.append_log(str(stderr_path), f"WORKER_FULL_DOWNLOAD worker={worker_index} symbols={len(uncached_symbols)}")
+    stage2_full, miss_full = scan.download_bars(
+        uncached_symbols,
+        period='3y',
+        stderr_path=str(stderr_path),
+        batch=stage2_batch,
+        interval='1wk',
+        phase=f'WORKER_{worker_index:02d}_FULL'
+    )
+    # 存入缓存
+    for ys, df in stage2_full.items():
+        if ys not in miss_full:
+            cache.put(ys, df)
+    miss_set.update(miss_full)
+
+# 最后，从缓存中读取所有符号的DataFrame用于扫描
+stage2 = {}
+for ys in liquid:
+    df = cache.get_cached(ys, max_age_days=9999)  # 从缓存读取
+    if df is not None and len(df) >= 52:
+        stage2[ys] = df
+    else:
+        miss_set.add(ys)
+
+shard_results, cons_list, break_list = scan.scan_stage2_dataset(stage2, mapped, str(stderr_path), cache)
+deep_scan_count += len(stage2)
+miss2.update(miss_set)
+results.extend(shard_results)
+consolidating_count += len(cons_list)
+breaking_out_count += len(break_list)
+shard_summary = {
+    'shard': 1,
+    'input_symbols': len(liquid),
+    'downloaded_symbols': len(stage2),
+    'misses': len(miss_set),
+    'candidates': len(shard_results),
+    'consolidating': len(cons_list),
+    'breaking_out': len(break_list),
+}
+shard_summaries.append(shard_summary)
+shard_path = worker_dir / f'shard_01.json'
+shard_path.write_text(
+    json.dumps({
+        'generated_at_utc': datetime.now(timezone.utc).isoformat(),
+        'summary': shard_summary,
+        'deep_scan_count': len(stage2),
+        'results': shard_results,
+        'miss_symbols': sorted(list(miss_set)),
+    }, ensure_ascii=False, indent=2, default=str),
+    encoding='utf-8',
+)
+scan.append_log(str(stderr_path), f"WORKER_SCAN_DONE worker={worker_index}/{worker_total} downloaded={len(stage2)} misses={len(miss_set)} candidates={len(shard_results)}")
+
 worker_result = {
     'generated_at_utc': datetime.now(timezone.utc).isoformat(),
     'worker': worker_index,
@@ -228,8 +288,8 @@ worker_result = {
     'deep_scan_count': deep_scan_count,
     'stage2_misses': len(miss2),
     'candidate_total': len(results),
-    'long_candidates': long_count,
-    'short_candidates': short_count,
+    'consolidating': consolidating_count,
+    'breaking_out': breaking_out_count,
     'shard_count': len(shard_summaries),
 }
 (worker_dir / 'result.json').write_text(json.dumps(worker_result, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -255,6 +315,7 @@ done
 
 WORKER_DIRS_JOINED="$(printf '%s\n' "${WORKER_DIRS[@]}")"
 export WORKER_DIRS_JOINED FAILURES
+
 "$PYTHON_BIN" - <<'PY'
 import json
 import os
@@ -296,7 +357,7 @@ for worker_dir in worker_dirs:
                 if sym and sym not in original_seen:
                     original_seen.add(sym)
                     original_symbols.append(sym)
-    stderr_path = worker_dir / 'pullback_scan.stderr.log'
+    stderr_path = worker_dir / 'consolidation_scan.stderr.log'
     if stderr_path.exists():
         stderr_chunks.append(f"===== {worker_dir.name} =====\n" + stderr_path.read_text(encoding='utf-8'))
     worker_name = worker_dir.name
@@ -312,11 +373,11 @@ for worker_dir in worker_dirs:
         results.extend(payload.get('results') or [])
         miss2.update(payload.get('miss_symbols') or [])
         deep_scan_count += int(payload.get('deep_scan_count') or 0)
-        long_count += int(summary.get('long_candidates') or 0)
-        short_count += int(summary.get('short_candidates') or 0)
+        # all are long (做多)
+        long_count += int(summary.get('candidates') or 0)
 
 if not stage1_payloads:
-    raise SystemExit('No worker_stage1.json files were produced; cannot aggregate pullback run')
+    raise SystemExit('No worker_stage1.json files were produced; cannot aggregate consolidation run')
 
 unique_liquid = []
 seen = set()
@@ -333,7 +394,7 @@ stage1_summary = {
     'liquid_symbols': unique_liquid,
     'universe_source': 'local_cache',
     'run_config': {
-        'mode': 'vcp-style multi-worker',
+        'mode': 'consolidation multi-worker',
         'universe_shards': int(os.environ.get('UNIVERSE_SHARDS', '0') or 0),
         'worker_concurrency': int(os.environ.get('WORKER_CONCURRENCY', '0') or 0),
         'stage1_period': os.environ.get('STAGE1_PERIOD', ''),
@@ -356,7 +417,7 @@ stage1_summary = {
 combined_stage1.write_text(json.dumps(stage1_summary, ensure_ascii=False, indent=2), encoding='utf-8')
 combined_stderr.write_text('\n\n'.join(stderr_chunks), encoding='utf-8')
 
-results.sort(key=lambda x: (x['_sort_pullback'], x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
+results.sort(key=lambda x: (x['score'], x['_duration_weeks']), reverse=True)
 deduped = []
 seen_symbols = set()
 for row in results:
@@ -365,34 +426,20 @@ for row in results:
     deduped.append(row)
     seen_symbols.add(row['symbol'])
 
-top10 = deduped[:10]
-top10_long = [row for row in deduped if row['direction'] == '做多'][:10]
-top10_short = [row for row in deduped if row['direction'] == '做空'][:10]
+consolidating = [r for r in deduped if not r['_is_breakout']]
+breaking_out = [r for r in deduped if r['_is_breakout']]
+consolidating.sort(key=lambda x: (x['score'], x['_duration_weeks']), reverse=True)
+breaking_out.sort(key=lambda x: (x['score'], x['_duration_weeks']), reverse=True)
 
-band_rows_20m_to_50m = []
-band_rows_50m_plus = []
-for row in deduped:
-    row_20m_to_50m = scan.clone_row_for_liquidity_band(row, '20m_to_50m')
-    row_50m_plus = scan.clone_row_for_liquidity_band(row, '50m_plus')
-    if row_20m_to_50m:
-        band_rows_20m_to_50m.append(row_20m_to_50m)
-    if row_50m_plus:
-        band_rows_50m_plus.append(row_50m_plus)
-
-band_rows_20m_to_50m.sort(key=lambda x: (x['_sort_pullback'], x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
-band_rows_50m_plus.sort(key=lambda x: (x['_sort_pullback'], x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
-
-top10_long_20m_to_50m = [row for row in band_rows_20m_to_50m if row['direction'] == '做多'][:10]
-top10_short_20m_to_50m = [row for row in band_rows_20m_to_50m if row['direction'] == '做空'][:10]
-top10_long_50m_plus = [row for row in band_rows_50m_plus if row['direction'] == '做多'][:10]
-top10_short_50m_plus = [row for row in band_rows_50m_plus if row['direction'] == '做空'][:10]
+top10_cons = consolidating[:10]
+top10_break = breaking_out[:10]
 
 out = {
     'generated_at_utc': datetime.now(timezone.utc).isoformat(),
     'data_sources': [
-        'Nasdaq Trader 月更股票池快取（含 Yahoo-friendly universe filter）',
-        'Yahoo Finance / yfinance 日線 OHLCV',
-        '回調日過去20個交易日平均交易額分組（2000萬-5000萬美元；5000萬美元以上）',
+        'Nasdaq Trader nasdaqlisted.txt',
+        'Nasdaq Trader otherlisted.txt',
+        'Yahoo Finance / yfinance 周线 OHLCV (3年)',
     ],
     'universe_total': int(len(original_symbols)),
     'liquid_count': int(len(unique_liquid)),
@@ -400,21 +447,14 @@ out = {
     'stage1_misses': int(stage1_summary['stage1_misses']),
     'stage2_misses': int(len(miss2)),
     'candidate_total': int(len(results)),
-    'long_candidates': int(long_count),
-    'short_candidates': int(short_count),
+    'consolidating_count': int(len(consolidating)),
+    'breaking_out_count': int(len(breaking_out)),
     'stderr_log': str(combined_stderr),
     'artifact_dir': str(Path(os.environ['ARTIFACT_ROOT'])),
     'shard_count': len(shard_summaries),
     'shards': shard_summaries,
-    'run_config': stage1_summary['run_config'],
-    'worker_stage1_summaries': stage1_summary['workers'],
-    'top10': top10,
-    'top10_long': top10_long,
-    'top10_short': top10_short,
-    'top10_long_20m_to_50m': top10_long_20m_to_50m,
-    'top10_short_20m_to_50m': top10_short_20m_to_50m,
-    'top10_long_50m_plus': top10_long_50m_plus,
-    'top10_short_50m_plus': top10_short_50m_plus,
+    'top10_consolidating': top10_cons,
+    'top10_breaking_out': top10_break,
 }
 json_path.write_text(json.dumps(out, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
 print(json.dumps({
@@ -426,9 +466,10 @@ print(json.dumps({
 }, ensure_ascii=False, indent=2))
 PY
 
-JSON_FINAL_PATH="$FINAL_DIR/pullback_scan.json"
-MD_FINAL_PATH="$FINAL_DIR/pullback_scan.md"
+JSON_FINAL_PATH="$FINAL_DIR/consolidation_scan.json"
+MD_FINAL_PATH="$FINAL_DIR/consolidation_scan.md"
 cp "$JSON_PATH" "$JSON_FINAL_PATH"
+
 "$PYTHON_BIN" "$ROOT_DIR/scripts/render_report.py" "$JSON_FINAL_PATH" "$MD_FINAL_PATH"
 cp "$MD_FINAL_PATH" "$MD_PATH"
 

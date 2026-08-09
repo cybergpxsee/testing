@@ -38,6 +38,7 @@ SHRINK_BONUS = 8                     # 振幅收窄加分
 BREAKOUT_VOL_MULTIPLIER = 1.5        # 突破放量倍数
 CHIP_BONUS = 5                       # 筹码密集区加分
 SLOPE_BONUS_MAX = 5                  # 20周斜率最大加分
+BOTTOM_THRESHOLD = 0.70              # 底部区域阈值：区间中轴 ≤ 3年最高价 × 0.70
 
 # 缓存配置
 CACHE_DIR_NAME = '.consolidation_cache'
@@ -412,9 +413,31 @@ def detect_bottom_consolidation(df: pd.DataFrame) -> dict:
     start_idx = best['start_idx']
     end_idx = best['end_idx']
     duration_weeks = best['duration_weeks']
+    
+    # ===== 硬过滤 1：盘整区间必须延伸至最新一周 =====
+    if end_idx != len(df) - 1:
+        return {'in_consolidation': False}
+    
+    # ===== 提取区间数据 =====
     zone_df = df.iloc[start_idx:end_idx+1]
     zone_low = float(zone_df['Low'].min())
     zone_high = float(zone_df['High'].max())
+    zone_mid = (zone_low + zone_high) / 2.0
+    latest_close = float(df.iloc[-1]['Close'])
+    high3y = float(df['High'].max())
+    
+    # ===== 硬过滤 2：底部区域判断（区间中轴 ≤ 3年最高价 × BOTTOM_THRESHOLD） =====
+    if high3y == 0 or zone_mid > high3y * BOTTOM_THRESHOLD:
+        return {'in_consolidation': False}
+    
+    # 当前状态（仅用于返回信息）
+    is_breakout = latest_close > zone_high * (1 + BREAKOUT_THRESHOLD)
+    breakout_vol_ratio = 0
+    if is_breakout:
+        vol20 = float(df.iloc[-20:]['Volume'].mean()) if len(df) >= 20 else 1
+        latest_vol = float(df.iloc[-1]['Volume'])
+        if vol20 > 0:
+            breakout_vol_ratio = latest_vol / vol20
     
     # 前半段/后半段振幅
     half = len(zone_df) // 2
@@ -433,16 +456,6 @@ def detect_bottom_consolidation(df: pd.DataFrame) -> dict:
             # 检查后续2周是否收回
             if any(df.iloc[j]['Close'] > zone_low for j in range(i+1, min(i+3, len(df)))):
                 reversal_count += 1
-    
-    # 当前状态
-    latest_close = float(df.iloc[-1]['Close'])
-    is_breakout = latest_close > zone_high * (1 + BREAKOUT_THRESHOLD)
-    breakout_vol_ratio = 0
-    if is_breakout:
-        vol20 = float(df.iloc[-20:]['Volume'].mean()) if len(df) >= 20 else 1
-        latest_vol = float(df.iloc[-1]['Volume'])
-        if vol20 > 0:
-            breakout_vol_ratio = latest_vol / vol20
     
     # 筹码密集区
     chip_zone = None
