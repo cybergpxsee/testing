@@ -469,12 +469,17 @@ def calculate_momentum_ranks(price_data: dict, spy_data: pd.DataFrame) -> pd.Dat
         lookback_200 = min(200, len(close))
         sma_200 = float(close[-lookback_200:].mean())
         
-        # 計算 200日均線斜率 (線性回歸斜率，近 20 日)
+        # 計算 200日均線斜率 (SMA200 線本身的斜率，近 20 日)
+        # 先計算 SMA200 序列，再取近 20 日做線性回歸
         slope_lookback = min(20, lookback_200)
         if slope_lookback >= 2:
+            # 計算 SMA200 序列
+            sma_200_series = pd.Series(close).rolling(window=200, min_periods=1).mean().values
+            # 取近 slope_lookback 日的 SMA200 值
+            sma_200_recent = sma_200_series[-slope_lookback:]
             x = np.arange(slope_lookback)
-            y = close[-slope_lookback:]
-            slope_200 = float(np.polyfit(x, y, 1)[0])  # 斜率
+            y = sma_200_recent
+            slope_200 = float(np.polyfit(x, y, 1)[0])  # SMA200 線的斜率
         else:
             slope_200 = 0.0
         
