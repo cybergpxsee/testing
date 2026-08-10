@@ -414,10 +414,6 @@ def detect_bottom_consolidation(df: pd.DataFrame) -> dict:
     end_idx = best['end_idx']
     duration_weeks = best['duration_weeks']
     
-    # ===== 硬过滤 1：盘整区间必须延伸至最新一周 =====
-    if end_idx != len(df) - 1:
-        return {'in_consolidation': False}
-    
     # ===== 提取区间数据 =====
     zone_df = df.iloc[start_idx:end_idx+1]
     zone_low = float(zone_df['Low'].min())
@@ -430,7 +426,7 @@ def detect_bottom_consolidation(df: pd.DataFrame) -> dict:
     if high3y == 0 or zone_mid > high3y * BOTTOM_THRESHOLD:
         return {'in_consolidation': False}
     
-    # 当前状态（仅用于返回信息）
+    # 当前状态
     is_breakout = latest_close > zone_high * (1 + BREAKOUT_THRESHOLD)
     breakout_vol_ratio = 0
     if is_breakout:
@@ -438,6 +434,16 @@ def detect_bottom_consolidation(df: pd.DataFrame) -> dict:
         latest_vol = float(df.iloc[-1]['Volume'])
         if vol20 > 0:
             breakout_vol_ratio = latest_vol / vol20
+    
+    # ===== 硬过滤 1：盘整区间必须延伸至最新一周（仅限未突破）=====
+    if not is_breakout:
+        # 盘整中：区间必须延伸至最新周
+        if end_idx != len(df) - 1:
+            return {'in_consolidation': False}
+    else:
+        # 刚突破：区间结束应在最近 4 周内（允许突破后回踩）
+        if end_idx < len(df) - 4:
+            return {'in_consolidation': False}
     
     # 前半段/后半段振幅
     half = len(zone_df) // 2
