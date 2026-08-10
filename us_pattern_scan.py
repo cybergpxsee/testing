@@ -380,33 +380,28 @@ def detect_bottom_consolidation(df: pd.DataFrame, stderr_path: str = '') -> dict
     if len(df) < MIN_CONSOLIDATION_WEEKS:
         return {'in_consolidation': False}
     
-    # 从最新往前找最长的符合振幅阈值的区间
-    max_lookback = min(len(df), MAX_CONSOLIDATION_WEEKS)
-    
+    # 从最新日期开始，找到第一个满足条件的区间
     best = None
-    # 从最新往前，尝试不同的结束点
-    for end in range(len(df)-1, len(df) - max_lookback - 1, -1):
-        # 区间必须至少52周
+    for end_offset in range(0, 5):  # 0 表示最新，1~4 表示最近几周（供突破使用）
+        end = len(df) - 1 - end_offset
         if end < MIN_CONSOLIDATION_WEEKS:
             break
-        # 向前扩展start，直到振幅超过阈值
+        # 从 end 向前扩展 start，找到第一个满足振幅<=阈值的 start（即最近的 start）
         for start in range(end - MIN_CONSOLIDATION_WEEKS + 1, -1, -1):
             seg = df.iloc[start:end+1]
             low = seg['Low'].min()
             high = seg['High'].max()
             amplitude = (high - low) / low if low > 0 else 999
             if amplitude <= AMPLITUDE_THRESHOLD:
-                # 找到符合条件的区间，记录最长的（start最小）
-                if best is None or start < best['start_idx']:
-                    best = {
-                        'start_idx': start,
-                        'end_idx': end,
-                        'duration_weeks': end - start + 1,
-                        'amplitude': amplitude,
-                    }
-                break  # 更早的start振幅只会更大
-        if best and (end - best['start_idx'] + 1) >= MIN_CONSOLIDATION_WEEKS * 2:
-            break
+                best = {
+                    'start_idx': start,
+                    'end_idx': end,
+                    'duration_weeks': end - start + 1,
+                    'amplitude': amplitude,
+                }
+                break
+        if best is not None and best['duration_weeks'] >= MIN_CONSOLIDATION_WEEKS:
+            break  # 找到满足条件的区间，立即跳出
     
     if best is None or best['duration_weeks'] < MIN_CONSOLIDATION_WEEKS:
         return {'in_consolidation': False}
@@ -572,7 +567,7 @@ def scan_consolidation(symbol: str, df: pd.DataFrame, stderr_path: str = ''):
     if is_breakout and info['breakout_volume_ratio'] > BREAKOUT_VOL_MULTIPLIER:
         score += 5
     
-    info = detect_bottom_consolidation(df, stderr_path)  # 重新获取以获取reversal_count_detail
+    # 复用第一次检测的 info，避免重复调用
     zone_low = info['zone_low']
     zone_high = info['zone_high']
     zone_text = f"{zone_low:.2f} - {zone_high:.2f}"
@@ -707,7 +702,9 @@ class ConsolidationCache:
 # ========== 修改后的扫描流程 ==========
 
 def scan_stage2_dataset(stage2, mapped, stderr_path, cache):
-    """扫描底部盘整，返回 (所有结果, 盘整中列表, 刚突破列表)"""
+    """扫描底部盘整，返回 (所有结果, 盘整中列表, 刚突破列表)
+    stage2 中的 DataFrame 已在外部完成缓存合并，直接扫描即可
+    """
     results = []
     consolidating = []
     breaking_out = []
@@ -718,12 +715,7 @@ def scan_stage2_dataset(stage2, mapped, stderr_path, cache):
             if len(df) < MIN_CONSOLIDATION_WEEKS:
                 continue
             
-            # 合并缓存
-            df = cache.merge_incremental(ys, df)
-            
-            # 更新缓存
-            cache.put(ys, df)
-            
+            # 数据已在外部准备好（合并缓存、写入缓存），直接扫描
             res = scan_consolidation(mapped[ys], df, stderr_path)
             if res:
                 res['symbol'] = mapped[ys]  # 还原原始symbol

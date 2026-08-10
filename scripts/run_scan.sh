@@ -230,7 +230,7 @@ if uncached_symbols:
     scan.append_log(str(stderr_path), f"WORKER_FULL_DOWNLOAD worker={worker_index} symbols={len(uncached_symbols)}")
     stage2_full, miss_full = scan.download_bars(
         uncached_symbols,
-        period='3y',
+        period=os.environ.get('STAGE2_PERIOD', '3y'),
         stderr_path=str(stderr_path),
         batch=stage2_batch,
         interval='1wk',
