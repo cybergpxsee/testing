@@ -360,7 +360,7 @@ def find_chip_dense_zone(df, around_idx, lookback=90, bins=24):
 
 # ========== 核心检测函数 ==========
 
-def detect_bottom_consolidation(df: pd.DataFrame) -> dict:
+def detect_bottom_consolidation(df: pd.DataFrame, stderr_path: str = '') -> dict:
     """
     检测股票是否处于长期底部盘整状态。
     返回字典包含：
@@ -375,6 +375,7 @@ def detect_bottom_consolidation(df: pd.DataFrame) -> dict:
         - latest_close: float
         - chip_zone: tuple or None
         - reversal_count_detail: int (用于输出)
+        - reject_reason: str (被拦截的原因，用于调试)
     """
     if len(df) < MIN_CONSOLIDATION_WEEKS:
         return {'in_consolidation': False}
@@ -424,7 +425,10 @@ def detect_bottom_consolidation(df: pd.DataFrame) -> dict:
     
     # ===== 硬过滤 2：底部区域判断（区间中轴 ≤ 3年最高价 × BOTTOM_THRESHOLD） =====
     if high3y == 0 or zone_mid > high3y * BOTTOM_THRESHOLD:
-        return {'in_consolidation': False, 'reject_reason': f'bottom_filter: zone_mid={zone_mid:.2f} > high3y*0.70={high3y*0.70:.2f}'}
+        reason = f'bottom_filter: zone_mid={zone_mid:.2f} > high3y*0.70={high3y*0.70:.2f}'
+        if stderr_path:
+            append_log(stderr_path, f"REJECT {reason}")
+        return {'in_consolidation': False, 'reject_reason': reason}
     
     # 当前状态
     is_breakout = latest_close > zone_high * (1 + BREAKOUT_THRESHOLD)
@@ -439,11 +443,17 @@ def detect_bottom_consolidation(df: pd.DataFrame) -> dict:
     if not is_breakout:
         # 盘整中：区间必须延伸至最新周
         if end_idx != len(df) - 1:
-            return {'in_consolidation': False, 'reject_reason': f'extend_filter: end_idx={end_idx} != {len(df)-1}'}
+            reason = f'extend_filter: end_idx={end_idx} != {len(df)-1}'
+            if stderr_path:
+                append_log(stderr_path, f"REJECT {reason}")
+            return {'in_consolidation': False, 'reject_reason': reason}
     else:
         # 刚突破：区间结束应在最近 4 周内（允许突破后回踩）
         if end_idx < len(df) - 4:
-            return {'in_consolidation': False, 'reject_reason': f'breakout_extend: end_idx={end_idx} < {len(df)-4}'}
+            reason = f'breakout_extend: end_idx={end_idx} < {len(df)-4}'
+            if stderr_path:
+                append_log(stderr_path, f"REJECT {reason}")
+            return {'in_consolidation': False, 'reject_reason': reason}
     
     # 前半段/后半段振幅
     half = len(zone_df) // 2
@@ -520,12 +530,10 @@ def calc_20d_slope_bonus(df, idx, bullish=True, lookback=20):
             return round(bonus, 1)
     return 0
 
-def scan_consolidation(symbol: str, df: pd.DataFrame):
+def scan_consolidation(symbol: str, df: pd.DataFrame, stderr_path: str = ''):
     """对单个股票扫描底部盘整，返回结果字典或None"""
-    info = detect_bottom_consolidation(df)
+    info = detect_bottom_consolidation(df, stderr_path)
     if not info.get('in_consolidation', False):
-        # 记录被过滤原因（仅前10个股票用于调试）
-        append_log('/tmp/consolidation_debug.log', f"FILTERED {symbol}: {info.get('reject_reason', 'unknown')}")
         return None
     
     # 计算评分
@@ -564,7 +572,7 @@ def scan_consolidation(symbol: str, df: pd.DataFrame):
     if is_breakout and info['breakout_volume_ratio'] > BREAKOUT_VOL_MULTIPLIER:
         score += 5
     
-    info = detect_bottom_consolidation(df)  # 重新获取以获取reversal_count_detail
+    info = detect_bottom_consolidation(df, stderr_path)  # 重新获取以获取reversal_count_detail
     zone_low = info['zone_low']
     zone_high = info['zone_high']
     zone_text = f"{zone_low:.2f} - {zone_high:.2f}"
@@ -716,7 +724,7 @@ def scan_stage2_dataset(stage2, mapped, stderr_path, cache):
             # 更新缓存
             cache.put(ys, df)
             
-            res = scan_consolidation(mapped[ys], df)
+            res = scan_consolidation(mapped[ys], df, stderr_path)
             if res:
                 res['symbol'] = mapped[ys]  # 还原原始symbol
                 results.append(res)
