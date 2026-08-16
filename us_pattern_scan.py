@@ -1645,9 +1645,11 @@ def main():
             from nvidia_vision_analyzer import analyze_top20
             print(f"\n=== NVIDIA Nemotron Visual Analysis (Top 20) ===", file=sys.stderr)
             
-            # Need stage2 data for visual analysis - reload from artifacts
+            # Need stage2 data for visual analysis - reload from artifacts (worker subdirs)
             stage2_cache = {}
-            for shard_path in Path(artifact_dir).glob('shard_*.json'):
+            # shard files are in worker_XX/ subdirectories under artifacts
+            artifacts_dir = Path(stderr_path).resolve().parent / (Path(stderr_path).stem + '.artifacts')
+            for shard_path in artifacts_dir.glob('worker_*/shard_*.json'):
                 with open(shard_path) as f:
                     data = json.load(f)
                     for r in data.get('results', []):
