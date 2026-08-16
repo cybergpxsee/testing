@@ -1638,12 +1638,12 @@ def main():
     (artifact_dir / 'final_output.json').write_text(json.dumps(out, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
     append_log(stderr_path, f"SCAN_DONE deep_scan={deep_scan_count} candidates={len(results)} deduped={len(deduped)}")
     
-    # Visual Analysis Integration (Top 10)
+    # Visual Analysis Integration (Top 20 -> Final Top 10)
     api_key = os.environ.get('NVIDIA_API_KEY')
     if api_key and results:
         try:
-            from nvidia_vision_analyzer import analyze_top10
-            print(f"\n=== NVIDIA Nemotron Visual Analysis (Top 10) ===", file=sys.stderr)
+            from nvidia_vision_analyzer import analyze_top20
+            print(f"\n=== NVIDIA Nemotron Visual Analysis (Top 20) ===", file=sys.stderr)
             
             # Need stage2 data for visual analysis - reload from artifacts
             stage2_cache = {}
@@ -1654,7 +1654,7 @@ def main():
                         stage2_cache[r['symbol'].replace('.', '-')] = r
             
             if stage2_cache:
-                results = analyze_top10(results, stage2_cache, artifact_dir, api_key)
+                results = analyze_top20(results, stage2_cache, artifact_dir, api_key, top_n=20, max_concurrent=3)
             else:
                 append_log(stderr_path, "VISUAL_ANALYSIS_SKIPPED: No stage2 cache available")
         except Exception as e:
