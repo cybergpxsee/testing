@@ -1,3 +1,6 @@
 yfinance
 pandas
 numpy
+openai
+mplfinance
+matplotlib

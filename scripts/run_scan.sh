@@ -192,6 +192,14 @@ shard_summaries = []
 for local_shard_idx, shard_symbols in enumerate(scan.split_into_shards(liquid, per_worker_stage2_shards), start=1):
     scan.append_log(str(stderr_path), f"WORKER_STAGE2_SHARD_START worker={worker_index}/{worker_total} shard={local_shard_idx}/{per_worker_stage2_shards} symbols={len(shard_symbols)}")
     stage2, shard_miss = scan.download_bars(shard_symbols, '1y', str(stderr_path), batch=stage2_batch, phase=f'WORKER_{worker_index:02d}_STAGE2_SHARD_{local_shard_idx:02d}')
+
+    # ========== 新增：儲存 stage2 原始資料供視覺分析使用 ==========
+    import pickle
+    stage2_pickle_path = worker_dir / f'shard_{local_shard_idx:02d}_data.pkl'
+    with open(stage2_pickle_path, 'wb') as f:
+        pickle.dump(stage2, f)
+    # ===========================================
+
     shard_results, shard_long, shard_short = scan.scan_stage2_dataset(stage2, mapped, str(stderr_path))
     deep_scan_count += len(stage2)
     miss2.update(shard_miss)
@@ -259,6 +267,7 @@ export WORKER_DIRS_JOINED FAILURES
 import json
 import os
 import sys
+import pickle
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -298,7 +307,7 @@ for worker_dir in worker_dirs:
                     original_symbols.append(sym)
     stderr_path = worker_dir / 'pullback_scan.stderr.log'
     if stderr_path.exists():
-        stderr_chunks.append(f"===== {worker_dir.name} =====\n" + stderr_path.read_text(encoding='utf-8'))
+        stderr_chunks.append(f"===== {worker_dir.name} =====\\n" + stderr_path.read_text(encoding='utf-8'))
     worker_name = worker_dir.name
     worker_num = int(worker_name.split('_')[-1]) if '_' in worker_name and worker_name.split('_')[-1].isdigit() else None
     for path in sorted(worker_dir.glob('shard_*.json')):
@@ -354,7 +363,7 @@ stage1_summary = {
     ],
 }
 combined_stage1.write_text(json.dumps(stage1_summary, ensure_ascii=False, indent=2), encoding='utf-8')
-combined_stderr.write_text('\n\n'.join(stderr_chunks), encoding='utf-8')
+combined_stderr.write_text('\\n\\n'.join(stderr_chunks), encoding='utf-8')
 
 results.sort(key=lambda x: (x['_sort_pullback'], x['score'], x['_sort_event'], x['_sort_confirm']), reverse=True)
 deduped = []
@@ -364,6 +373,44 @@ for row in results:
         continue
     deduped.append(row)
     seen_symbols.add(row['symbol'])
+
+# ========== 新增：載入所有 stage2 pickle ==========
+stage2_data = {}
+for worker_dir in worker_dirs:
+    for pkl_path in worker_dir.glob('shard_*_data.pkl'):
+        with open(pkl_path, 'rb') as f:
+            shard_data = pickle.load(f)
+            stage2_data.update(shard_data)
+# ================================================
+
+# ========== 新增：執行視覺分析（只針對前 20 檔） ==========
+api_key = os.environ.get('NVIDIA_API_KEY')
+if api_key and deduped:
+    try:
+        from nvidia_vision_analyzer import analyze_top20
+        # 取前 20 檔（因為視覺分析耗時，只做 top20）
+        top_candidates = deduped[:20]
+        artifact_dir = Path(os.environ['ARTIFACT_ROOT'])
+        updated_top = analyze_top20(
+            top_candidates,
+            stage2_data,
+            artifact_dir,
+            api_key,
+            top_n=20,
+            max_concurrent=3
+        )
+        # 將更新後的數據合併回 deduped
+        updated_map = {item['symbol']: item for item in updated_top}
+        for i, row in enumerate(deduped):
+            if row['symbol'] in updated_map:
+                deduped[i] = updated_map[row['symbol']]
+        # 重新對全部 deduped 排序（依照 final_score，若無則用原 score）
+        deduped.sort(key=lambda x: x.get('final_score', x['score']), reverse=True)
+        print(f"Visual analysis completed for {len(updated_top)} candidates")
+    except Exception as e:
+        # append_log(stderr_path, f"VISUAL_ANALYSIS_ERROR: {e}")
+        print(f"Visual analysis error: {e}")
+# ====================================================
 
 top10 = deduped[:10]
 top10_long = [row for row in deduped if row['direction'] == '做多'][:10]
