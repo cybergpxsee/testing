@@ -150,7 +150,7 @@ def analyze_top10(results: list, stage2_data: dict, artifact_dir: str, api_key: 
             tech = cand.get('score', 0)
             vis = v.get('visual_score', 0)
             cand['visual_analysis'] = v
-            cand['final_score'] = round(tech * 0.6 + vis * 0.4, 1)
+            cand['final_score'] = round(tech * 0.3 + vis * 0.7, 1)
             print(f"  [{i+1}] {cand['symbol']}: tech={tech} visual={vis} final={cand['final_score']} action={v.get('action')}")
         except Exception as e:
             print(f"  [{i+1}] {cand['symbol']}: ERROR - {e}")
