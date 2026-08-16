@@ -51,6 +51,7 @@ jobs:
       HERMES_SCAN_WORKER_CONCURRENCY: ${{ github.event.inputs.worker_concurrency || '3' }}
       HERMES_SCAN_WORKER_STAGGER: ${{ github.event.inputs.worker_stagger || '1' }}
       HERMES_SCAN_STAGE2_SHARDS_PER_WORKER: '1'
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
