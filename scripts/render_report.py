@@ -77,6 +77,18 @@ def render(out: dict) -> str:
     lines.append('')
     lines.append(f"🗂️ 數據來源：{'；'.join(data_sources)}")
     lines.append(f'📅 數據日期：{report_date}')
+    
+    # 視覺分析覆蓋率統計
+    visual_ok = 0
+    visual_total = 0
+    for row in all_rows:
+        va = row.get('visual_analysis')
+        if va:
+            visual_total += 1
+            if isinstance(va, dict) and 'error' not in va:
+                visual_ok += 1
+    if visual_total > 0:
+        lines.append(f'👁️ 視覺分析覆蓋率：{visual_ok}/{visual_total}')
     lines.append('')
 
     if not all_rows:

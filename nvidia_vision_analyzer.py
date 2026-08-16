@@ -8,6 +8,7 @@ import json
 import base64
 import io
 import random
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -16,7 +17,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 
 class ChartGenerator:
@@ -70,14 +71,14 @@ class NvidiaVisionAnalyzer:
     """
     
     def __init__(self, api_key: str, model: str = "nvidia/nemotron-3-ultra"):
-        self.client = OpenAI(api_key=api_key, base_url="https://integrate.api.nvidia.com/v1")
+        self.client = AsyncOpenAI(api_key=api_key, base_url="https://integrate.api.nvidia.com/v1")
         self.model = model
     
-    def analyze(self, img_bytes: bytes, symbol: str, ctx: Dict) -> Dict:
-        """分析 K 線圖"""
+    async def analyze(self, img_bytes: bytes, symbol: str, ctx: Dict) -> Dict:
+        """分析 K 線圖 (異步)"""
         img_b64 = base64.b64encode(img_bytes).decode()
         prompt = self._prompt(symbol, ctx)
-        resp = self.client.chat.completions.create(
+        resp = await self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": [
                 {"type": "text", "text": prompt},
@@ -122,40 +123,75 @@ class NvidiaVisionAnalyzer:
         except: return {"error": "parse failed", "raw": content[:500]}
 
 
-def analyze_top10(results: list, stage2_data: dict, artifact_dir: str, api_key: str) -> list:
-    """分析前 10 名候選"""
-    chart_gen = ChartGenerator(dpi=100)
-    vision = NvidiaVisionAnalyzer(api_key, "nvidia/nemotron-3-ultra")
-    save_dir = Path(artifact_dir) / 'charts'
-    save_dir.mkdir(exist_ok=True)
-    
-    for i, cand in enumerate(results[:10]):
+async def _analyze_single(cand: dict, chart_gen: ChartGenerator, vision: NvidiaVisionAnalyzer, 
+                          stage2_data: dict, save_dir: Path, semaphore: asyncio.Semaphore, idx: int) -> dict:
+    """分析單一候選 (異步，帶信號量控制)"""
+    async with semaphore:
         ys = cand['symbol'].replace('.', '-')
         if ys not in stage2_data:
-            continue
+            return cand
         df = stage2_data[ys]
         markers = {}
         for k, label in [('confirm_date', 'confirm_buy'), ('pullback_date', 'pullback')]:
             if k in cand:
-                idx = df.index[df['Date'] == cand[k]].tolist()
-                if idx: markers[label] = idx[0]
+                idx_list = df.index[df['Date'] == cand[k]].tolist()
+                if idx_list: markers[label] = idx_list[0]
         
         try:
             img = chart_gen.generate(df, cand['symbol'], markers, bars=100)
             (save_dir / f"{cand['symbol']}_chart.png").write_bytes(img)
             
             ctx = {k: cand.get(k) for k in ['pattern','zone','confirm_date','pullback_date','score','fib618','volume_feature','slowdown_feature']}
-            v = vision.analyze(img, cand['symbol'], ctx)
+            v = await vision.analyze(img, cand['symbol'], ctx)
             
             tech = cand.get('score', 0)
             vis = v.get('visual_score', 0)
             cand['visual_analysis'] = v
             cand['final_score'] = round(tech * 0.3 + vis * 0.7, 1)
-            print(f"  [{i+1}] {cand['symbol']}: tech={tech} visual={vis} final={cand['final_score']} action={v.get('action')}")
+            print(f"  [{idx+1}] {cand['symbol']}: tech={tech} visual={vis} final={cand['final_score']} action={v.get('action')}")
         except Exception as e:
-            print(f"  [{i+1}] {cand['symbol']}: ERROR - {e}")
+            print(f"  [{idx+1}] {cand['symbol']}: ERROR - {e}")
             cand['visual_analysis'] = {"error": str(e)}
             cand['final_score'] = cand.get('score', 0)
+        return cand
+
+
+async def analyze_top20_async(results: list, stage2_data: dict, artifact_dir: str, api_key: str, 
+                               top_n: int = 20, max_concurrent: int = 3) -> list:
+    """異步分析前 N 名候選，限制並發數"""
+    chart_gen = ChartGenerator(dpi=100)
+    vision = NvidiaVisionAnalyzer(api_key, "nvidia/nemotron-3-ultra")
+    save_dir = Path(artifact_dir) / 'charts'
+    save_dir.mkdir(exist_ok=True)
     
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
+    # 只取前 top_n 個進行視覺分析
+    candidates = results[:top_n]
+    
+    print(f"\n=== NVIDIA Nemotron Visual Analysis (Top {top_n}, concurrent={max_concurrent}) ===")
+    
+    # 建立異步任務
+    tasks = [
+        _analyze_single(cand, chart_gen, vision, stage2_data, save_dir, semaphore, i)
+        for i, cand in enumerate(candidates)
+    ]
+    
+    # 等待所有任務完成
+    analyzed_candidates = await asyncio.gather(*tasks)
+    
+    # 將分析結果合併回原列表
+    analyzed_map = {c['symbol']: c for c in analyzed_candidates}
+    for i, cand in enumerate(results):
+        if cand['symbol'] in analyzed_map:
+            results[i] = analyzed_map[cand['symbol']]
+    
+    # 按 final_score 重新排序
     results.sort(key=lambda x: x.get('final_score', x['score']), reverse=True)
     return results
+
+
+def analyze_top20(results: list, stage2_data: dict, artifact_dir: str, api_key: str, 
+                   top_n: int = 20, max_concurrent: int = 3) -> list:
+    """同步入口：分析前 N 名候選 (預設 Top 20，並發 3)"""
+    return asyncio.run(analyze_top20_async(results, stage2_data, artifact_dir, api_key, top_n, max_concurrent))

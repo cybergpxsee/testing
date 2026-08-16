@@ -16,7 +16,6 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Any
 
-
 # Discord embed color constants
 COLOR_LONG = 0x00FF7F   # Spring Green
 COLOR_SHORT = 0xFF4444  # Red
@@ -85,6 +84,21 @@ def create_discord_payload(scan_result: Dict[str, Any]) -> Dict[str, Any]:
     liquid_count = scan_result.get('liquid_count', 'N/A')
     deep_scan = scan_result.get('deep_scan_count', 'N/A')
 
+    # 視覺分析覆蓋率統計
+    all_rows = (scan_result.get('top10_long_50m_plus', []) or []) + \
+               (scan_result.get('top10_long_20m_to_50m', []) or []) + \
+               (scan_result.get('top10_short_50m_plus', []) or []) + \
+               (scan_result.get('top10_short_20m_to_50m', []) or [])
+    visual_ok = 0
+    visual_total = 0
+    for row in all_rows:
+        va = row.get('visual_analysis')
+        if va:
+            visual_total += 1
+            if isinstance(va, dict) and 'error' not in va:
+                visual_ok += 1
+    visual_info = f"👁️ **視覺分析覆蓋率**: {visual_ok}/{visual_total}\n" if visual_total > 0 else ""
+
     # Get grouped candidates
     long_50m = scan_result.get('top10_long_50m_plus', []) or []
     long_20m = scan_result.get('top10_long_20m_to_50m', []) or []
@@ -101,6 +115,7 @@ def create_discord_payload(scan_result: Dict[str, Any]) -> Dict[str, Any]:
         "description": (
             f"**掃描日期**: {scan_date}\n"
             f"📊 **掃描範圍**: {universe_total} 支 → 流動性 {liquid_count} 支 → 深度掃描 {deep_scan} 支\n"
+            f"{visual_info}"
             f"🟢 **做多候選**: {total_long} ｜ 🔴 **做空候選**: {total_short}"
         ),
         "color": COLOR_NEUTRAL,
