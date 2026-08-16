@@ -1,4 +1,4 @@
-name: consolidation-scan
+name: pullback-scan
 
 on:
   workflow_dispatch:
@@ -14,19 +14,19 @@ on:
       stage1_batch:
         description: 'Stage1 batch size'
         required: false
-        default: '90'
+        default: '120'
       stage2_batch:
         description: 'Stage2 batch size'
         required: false
-        default: '120'
+        default: '100'
       stage2_period:
-        description: 'Stage2 deep-history lookback (e.g., 3y for weekly consolidation)'
+        description: 'Stage2 deep-history lookback (e.g., 1y for 52-week high/low)'
         required: false
-        default: '3y'
+        default: '1y'
       universe_shards:
         description: 'Shard count before workers start'
         required: false
-        default: '12'
+        default: '18'
       worker_concurrency:
         description: 'How many workers to run in parallel'
         required: false
@@ -36,35 +36,34 @@ on:
         required: false
         default: '0.5'
   
-  # 定时执行：每周一 UTC 00:00 (美东周日晚)
-  schedule:
-    - cron: '0 0 * * 1'
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 100
     env:
       PYTHONUNBUFFERED: '1'
       HERMES_SCAN_MAX_SYMBOLS: ${{ github.event.inputs.max_symbols || '' }}
       HERMES_SCAN_STAGE1_PERIOD: ${{ github.event.inputs.stage1_period || '1mo' }}
-      HERMES_SCAN_STAGE1_BATCH: ${{ github.event.inputs.stage1_batch || '90' }}
-      HERMES_SCAN_STAGE2_BATCH: ${{ github.event.inputs.stage2_batch || '120' }}
+      HERMES_SCAN_STAGE1_BATCH: ${{ github.event.inputs.stage1_batch || '120' }}
+      HERMES_SCAN_STAGE2_BATCH: ${{ github.event.inputs.stage2_batch || '100' }}
       HERMES_SCAN_UNIVERSE_SHARDS: ${{ github.event.inputs.universe_shards || '12' }}
-      HERMES_SCAN_WORKER_CONCURRENCY: ${{ github.event.inputs.worker_concurrency || '6' }}
-      HERMES_SCAN_WORKER_STAGGER: ${{ github.event.inputs.worker_stagger || '0.5' }}
+      HERMES_SCAN_WORKER_CONCURRENCY: ${{ github.event.inputs.worker_concurrency || '3' }}
+      HERMES_SCAN_WORKER_STAGGER: ${{ github.event.inputs.worker_stagger || '1' }}
       HERMES_SCAN_STAGE2_SHARDS_PER_WORKER: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # === 拉取共享股票池 ===
+      # === 新增：從共享倉庫拉取股票池 ===
       - name: Pull shared universe data
         uses: actions/checkout@v4
         with:
           repository: cybergpxsee/data-share
           path: .tmp/shared-universe
           fetch-depth: 1
+          # 如果倉庫是私有的，請取消註解並設定 secret：
+          # token: ${{ secrets.PAT_FOR_DATA_SHARE }}
 
       - name: Copy universe files to local data/universe
         run: |
@@ -82,29 +81,31 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # === 已移除 Ensure local universe cache exists 步驟（現由共享倉庫提供） ===
+
       - name: Run scan
         env:
-          HERMES_SCAN_STAGE2_PERIOD: ${{ github.event.inputs.stage2_period || '3y' }}
+          HERMES_SCAN_STAGE2_PERIOD: ${{ github.event.inputs.stage2_period || '1y' }}
         run: bash scripts/run_scan.sh
 
       - name: Upload output artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: consolidation-scan-${{ github.run_id }}
+          name: pullback-scan-${{ github.run_id }}
           path: output/
           if-no-files-found: error
 
       - name: Append latest markdown to job summary
         shell: bash
         run: |
-          latest_md=$(find output -name 'consolidation_scan.md' | sort | tail -n 1)
-          echo '## Latest Consolidation Report' >> "$GITHUB_STEP_SUMMARY"
+          latest_md=$(find output -name 'pullback_scan.md' | sort | tail -n 1)
+          echo '## Latest report' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           cat "$latest_md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate Discord embed payload
         run: |
-          latest_json=$(find output -name 'consolidation_scan.json' | sort | tail -n 1)
+          latest_json=$(find output -name 'pullback_scan.json' | sort | tail -n 1)
           python scripts/render_discord.py "$latest_json" output/
 
       - name: Upload Discord payload artifact
