@@ -30,7 +30,7 @@ class ChartGenerator:
             rc={'font.size': 9, 'figure.figsize': (14, 8)}
         )
     
-    def generate(self, df: pd.DataFrame, symbol: str, markers: Dict = None, bars: int = 100) -> bytes:
+    def generate(self, df: pd.DataFrame, symbol: str, markers: Dict = None, bars: int = 200) -> bytes:
         """生成 K 線圖，返回 PNG bytes"""
         plot_df = df.copy()
         plot_df.index = pd.to_datetime(plot_df['Date'])
@@ -38,8 +38,9 @@ class ChartGenerator:
         
         apds = []
         for period, color, width in [(20, '#2196F3', 1), (50, '#FF9800', 1), (200, '#9C27B0', 1.5)]:
-            plot_df[f'MA{period}'] = plot_df['Close'].rolling(period).mean()
-            apds.append(mpf.make_addplot(plot_df[f'MA{period}'], color=color, width=width, alpha=0.8))
+            if len(plot_df) >= period:
+                plot_df[f'MA{period}'] = plot_df['Close'].rolling(period).mean()
+                apds.append(mpf.make_addplot(plot_df[f'MA{period}'], color=color, width=width, alpha=0.8))
         
         if markers:
             for name, idx in markers.items():
