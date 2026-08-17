@@ -88,8 +88,7 @@ class NvidiaVisionAnalyzer:
             max_tokens=65536,
             temperature=0.6,
             top_p=0.95,
-            seed=42,
-            reasoning_budget=16384
+            seed=42
         )
         return self._parse(resp.choices[0].message.content)
     
