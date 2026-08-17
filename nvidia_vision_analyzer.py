@@ -85,7 +85,11 @@ class NvidiaVisionAnalyzer:
                 {"type": "text", "text": prompt},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
             ]}],
-            max_tokens=1200, temperature=0.1, top_p=0.9, seed=42
+            max_tokens=65536,
+            temperature=0.6,
+            top_p=0.95,
+            seed=42,
+            reasoning_budget=16384
         )
         return self._parse(resp.choices[0].message.content)
     
@@ -161,7 +165,7 @@ async def analyze_top20_async(results: list, stage2_data: dict, artifact_dir: st
                                top_n: int = 20, max_concurrent: int = 3) -> list:
     """異步分析前 N 名候選，限制並發數"""
     chart_gen = ChartGenerator(dpi=100)
-    vision = NvidiaVisionAnalyzer(api_key, "nvidia/nemotron-3-ultra")
+    vision = NvidiaVisionAnalyzer(api_key, "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
     save_dir = Path(artifact_dir) / 'charts'
     save_dir.mkdir(exist_ok=True)
     
