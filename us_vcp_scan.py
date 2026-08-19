@@ -93,6 +93,9 @@ MAX_PULLBACKS = get_env_int("HERMES_VCP_MAX_PULLBACKS", _vcp.get("max_pullbacks"
 LAST_LOW_RECENCY = get_env_int("HERMES_VCP_LAST_LOW_RECENCY", _vcp.get("last_low_recency", 15))
 TIGHT_RANGE_MAX_PCT = get_env_float("HERMES_VCP_TIGHT_RANGE_MAX_PCT", _vcp.get("tight_range_max_pct", 7.0))
 
+# 最後低點最小成交額（可配置，預設 1000 萬）
+LAST_LOW_MIN_DOLLAR_VOLUME = get_env_float("HERMES_VCP_LAST_LOW_MIN_DOLLAR_VOLUME", _vcp.get("last_low_min_dollar_volume", 10_000_000))
+
 NEAR_PIVOT_MIN_PCT = get_env_float("HERMES_VCP_NEAR_PIVOT_MIN_PCT", _near_pivot.get("window_min_pct", -6.0))
 NEAR_PIVOT_MAX_PCT = get_env_float("HERMES_VCP_NEAR_PIVOT_MAX_PCT", _near_pivot.get("window_max_pct", 3.0))
 
@@ -387,11 +390,10 @@ def detect_vcp(symbol: str, df: pd.DataFrame, stderr_path: str = None):
     breakout_vol = float(vol.iloc[-1]) > avg_vol_20 * BREAKOUT_VOL_MULTIPLIER if avg_vol_20 > 0 else False
     near_pivot = NEAR_PIVOT_MIN_PCT <= distance_to_pivot_pct <= NEAR_PIVOT_MAX_PCT
 
-    # 成交量/位置條件：只要滿足其一即可（不再硬性要求 volume_dry 或 breakout_vol）
-    if not (breakout_today or volume_dry or near_pivot):
-        if stderr_path:
-            append_log(stderr_path, f"DEBUG_VCP {symbol}: volume/position condition fail (breakout_today={breakout_today}, volume_dry={volume_dry}, near_pivot={near_pivot}, vol10={avg_vol_10:.0f}, vol50={avg_vol_50:.0f}, threshold={VOLUME_DRY_THRESHOLD})")
-        return None
+    # 量價位置組合：改為加分項，不再硬性要求
+    volume_position_ok = breakout_today or volume_dry or near_pivot
+    if not volume_position_ok and stderr_path:
+        append_log(stderr_path, f"DEBUG_VCP {symbol}: volume/position combo fail (breakout_today={breakout_today}, volume_dry={volume_dry}, near_pivot={near_pivot}, vol10={avg_vol_10:.0f}, vol50={avg_vol_50:.0f}) - no bonus")
 
     # 突破日成交量：不再硬性要求 1.5 倍
     if breakout_today:
@@ -418,10 +420,12 @@ def detect_vcp(symbol: str, df: pd.DataFrame, stderr_path: str = None):
             append_log(stderr_path, f"DEBUG_VCP {symbol}: last_low_global < 20 ({last_low_global})")
         return None
     last_low_avg_dv = trailing_avg_dollar_volume(df, last_low_global, days=20)
-    if last_low_avg_dv is None or last_low_avg_dv < 20_000_000:
+    # 最後低點流動性：改為可配置閾值，預設降為 1000 萬
+    last_low_min_dv = LAST_LOW_MIN_DOLLAR_VOLUME
+    if last_low_avg_dv is None or last_low_avg_dv < last_low_min_dv:
         if stderr_path:
-            append_log(stderr_path, f"DEBUG_VCP {symbol}: last_low avg dollar vol < 20M ({last_low_avg_dv})")
-        return None
+            append_log(stderr_path, f"DEBUG_VCP {symbol}: last_low avg dollar vol < {last_low_min_dv/1e6:.0f}M ({last_low_avg_dv}) - no bonus")
+        # 不再硬性拒絕，改為記錄
 
     stage = '剛突破' if breakout_today else ('近突破點' if near_pivot else '整理末端')
 
@@ -447,6 +451,8 @@ def detect_vcp(symbol: str, df: pd.DataFrame, stderr_path: str = None):
         score += 8.0   # highs_convergence_bonus
     if volume_dry:
         score += VCP_VOLUME_DRY_BONUS
+    if volume_position_ok:
+        score += VCP_VOLUME_DRY_BONUS  # 量價位置組合加分
     if breakout_today and breakout_vol:
         score += VCP_BREAKOUT_VOL_BONUS
     elif breakout_today:
@@ -673,11 +679,10 @@ def detect_cup_handle(symbol: str, df: pd.DataFrame, stderr_path: str = None):
     breakout_vol = float(vol.iloc[-1]) > avg_vol_20 * BREAKOUT_VOL_MULTIPLIER if avg_vol_20 > 0 else False
     near_pivot = NEAR_PIVOT_MIN_PCT <= distance_to_pivot_pct <= NEAR_PIVOT_MAX_PCT
 
-    # 成交量/位置條件：只要滿足其一即可（不再硬性要求 volume_dry 或 breakout_vol）
-    if not (breakout_today or volume_dry or near_pivot):
-        if stderr_path:
-            append_log(stderr_path, f"DEBUG_CUP {symbol}: volume/position condition fail (breakout_today={breakout_today}, volume_dry={volume_dry}, near_pivot={near_pivot}, vol10={avg_vol_10:.0f}, vol50={avg_vol_50:.0f}, threshold={VOLUME_DRY_THRESHOLD})")
-        return None
+    # 量價位置組合：改為加分項，不再硬性要求
+    volume_position_ok = breakout_today or volume_dry or near_pivot
+    if not volume_position_ok and stderr_path:
+        append_log(stderr_path, f"DEBUG_CUP {symbol}: volume/position combo fail (breakout_today={breakout_today}, volume_dry={volume_dry}, near_pivot={near_pivot}, vol10={avg_vol_10:.0f}, vol50={avg_vol_50:.0f}) - no bonus")
 
     # 突破日成交量：不再硬性要求 1.5 倍
     if breakout_today:
@@ -717,6 +722,8 @@ def detect_cup_handle(symbol: str, df: pd.DataFrame, stderr_path: str = None):
         score += CUP_VOLUME_DRY_BONUS
     if handle_vol_dry:
         score += CUP_VOLUME_DRY_BONUS  # 柄區縮量同權重
+    if volume_position_ok:
+        score += CUP_VOLUME_DRY_BONUS  # 量價位置組合加分
     if breakout_today and breakout_vol:
         score += CUP_BREAKOUT_VOL_BONUS
     elif breakout_today:

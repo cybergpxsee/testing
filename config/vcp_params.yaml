@@ -1,0 +1,188 @@
+# ============================================================
+# 美股 VCP + 杯柄掃描器參數配置（極度放寬版）
+# 環境變量可覆蓋本文件中的任何值（變量名見註釋）
+# ============================================================
+
+# ---------- 趨勢過濾 ----------
+trend_filter:
+  # 價格相對於 52 週高點的最小比例（設為 0 表示不限制）
+  # 環境變量: HERMES_VCP_MIN_PRICE_TO_YEAR_HIGH_PCT
+  min_price_to_year_high_pct: 0.0
+
+# ---------- VCP 形態核心參數 ----------
+vcp:
+  # 尋找價格高點的回看天數
+  price_high_lookback: 120
+  # 收縮形態分析的回看天數
+  contraction_lookback: 80
+  # 計算 pivot（支點）時參考的窗口大小
+  pivot_window: 15
+  # 最後 N 根 K 線要求收盤緊密收縮
+  last_tight_window: 10
+
+  # 杯柄相關（也用於 VCP 共用邏輯）
+  cup_lookback: 180
+  cup_min_bars: 30
+  handle_min_bars: 14
+  handle_max_bars: 60
+
+  # ---------- 回撤參數（極度放寬：只要後波 < 前波即可） ----------
+  # 單次回撤最小幅度（3%）
+  min_drawdown: 0.03
+  # 單次回撤最大幅度（35%）
+  max_drawdown: 0.35
+
+  # 回撤遞減因子：設為 1.0，offset 設 0，只要後波 < 前波即可
+  drawdown_decrease_factor: 1.0
+  drawdown_decrease_offset: 0.0
+
+  # 低點容忍度：設為 1.0，允許低點平齊或略微下探
+  low_price_tolerance: 1.0
+
+  # 兩次回撤低點之間的最小間隔（交易日）
+  min_bars_between_lows: 5
+
+  # 最少回撤次數
+  min_pullbacks: 2
+  # 最多回撤次數（用於搜索序列）
+  max_pullbacks: 4
+
+  # 最後一個低點距離當前日期的最大天數
+  last_low_recency: 30
+
+  # 最近 10 日價格區間振幅最大百分比（極度放寬）
+  tight_range_max_pct: 20.0
+
+  # 最後低點最小成交額（可配置，預設 1000 萬）
+  last_low_min_dollar_volume: 10000000
+
+# ---------- 近突破 / 突破窗口（極度放寬） ----------
+near_pivot:
+  # 距離 pivot（支點）的價格範圍（-30% ~ +5%）
+  window_min_pct: -30.0
+  window_max_pct: 5.0
+
+# ---------- 成交量參數（改為加分項，閾值設極寬鬆） ----------
+volume:
+  # 縮量閾值：設為 1.0（幾乎不觸發硬性過濾，靠評分加分）
+  dry_threshold: 1.0
+  # 突破放量倍數：設為 0.5（極低門檻，靠評分加分）
+  breakout_vol_multiplier: 0.5
+  # 收縮量判斷（用於加分）
+  shrink_threshold: 1.0
+
+# ---------- 結構 / 趨勢線參數 ----------
+structure:
+  short_trend_lookback: 30
+  long_trend_lookback: 90
+  swing_window: 3
+  min_bars_between_swings: 5
+  long_term_trend_bonus: 5.0
+
+# ---------- 斐波那契 0.618 相關 ----------
+fibonacci:
+  max_reclaim_days: 5
+  reclaim_close_above: true
+  reclaim_gap_ok: true
+  touch_tolerance_pct: 0.015
+
+# ---------- 確認日（蠟燭質量）參數 ----------
+confirmation:
+  min_body_shrink_pct: 0.85
+  min_tr_shrink_pct: 0.90
+  vol_shrink_threshold: 1.0
+
+# ---------- 評分權重（加強加分項權重） ----------
+scoring:
+  vcp:
+    base_score: 50.0
+    per_contraction: 8.0
+    distance_weight: 2.0
+    tight_range_weight: 0.8
+    trend_strength_weight: 0.6
+    volume_dry_bonus: 12.0
+    breakout_vol_bonus: 12.0
+    breakout_today_bonus: 8.0
+    strong_contraction_bonus: 10.0
+    # 新增加分項（需代碼配合）
+    atr_contraction_bonus: 8.0
+    highs_convergence_bonus: 8.0
+    trend_structure_bonus: 10.0
+
+  cup_handle:
+    base_score: 56.0
+    distance_weight: 2.0
+    cup_depth_weight: 30.0
+    handle_depth_weight: 80.0
+    trend_strength_weight: 0.6
+    volume_dry_bonus: 10.0
+    breakout_vol_bonus: 12.0
+    breakout_today_bonus: 8.0
+    handle_days_bonus: 5.0
+    # 新增加分項（需代碼配合）
+    atr_contraction_bonus: 8.0
+    highs_convergence_bonus: 8.0
+    trend_structure_bonus: 10.0
+
+# ---------- 動態調整（基於 ATR） ----------
+dynamic_adjustment:
+  enabled: true
+  atr_period: 14
+  high_volatility_percentile: 80
+  low_volatility_percentile: 20
+
+# ---------- 杯柄形態專用參數（極度放寬） ----------
+cup_handle:
+  # 柄低於杯身中線的扣分（減輕懲罰）
+  handle_below_midline_penalty: -1.0
+  # 左右杯沿對齊的最小/最大比例（極度放寬）
+  rim_alignment_min: 0.70
+  rim_alignment_max: 1.20
+  # 杯身深度範圍（放寬）
+  cup_depth_min: 0.08
+  cup_depth_max: 0.50
+  # 柄深度範圍（極度放寬）
+  handle_depth_min: 0.01
+  handle_depth_max: 0.30
+  # 柄相對於杯身中線的最大高度比例（放寬）
+  handle_max_height_pct: 0.20
+  # 允許柄跌破杯身中線
+  handle_allow_below_midline: true
+
+# ---------- 數據獲取 ----------
+data_fetch:
+  stage1_period: "20d"
+  stage2_period: "10mo"
+  stage1_batch: 90
+  stage2_batch: 100
+  download_timeout: 30
+  max_retries: 3
+  retry_delay: 5.0
+  nasdaq_cache_hours: 24
+
+# ---------- 並行處理 ----------
+parallel:
+  stage1_batch_size: 90
+  stage2_batch_size: 100
+  max_workers: 8
+  universe_shard_count: 18
+  worker_concurrency: 6
+
+# ---------- 輸出 ----------
+output:
+  top_n: 20
+  markdown_format: true
+  include_logic: true
+  include_recent_windows: true
+
+# ---------- 質量過濾（降低門檻配合放寬條件） ----------
+quality_filter:
+  enabled: true
+  min_score_by_stage:
+    剛突破: 50.0
+    近突破點: 40.0
+    整理末端: 30.0
+  default_min_score: 35.0
+
+# ---------- 風險提示（文本） ----------
+risk_disclaimer: "這是 AI 掃描出的參考買賣點，不涉及投資建議，做多/做空有風險。"
