@@ -1,9 +1,6 @@
 name: momentum-rank-scan
 
 on:
-  schedule:
-    # 每週六 06:00 UTC 執行 (台灣時間週六 14:00)
-    - cron: '0 6 * * 6'
   workflow_dispatch:
     inputs:
       max_symbols:
