@@ -1,0 +1,56 @@
+name: fetch-history
+
+# 一次性抓取回放/标定用的完整日线历史（Yahoo 存档网页只带最近一页，不够用）。
+# 手动触发：Actions → fetch-history → Run workflow → 下载 artifact `history-*`。
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: '逗号分隔的股票代码；留空=用脚本内置的截图对应区间'
+        required: false
+        default: ''
+      out_dir:
+        description: '导出目录（相对仓库根）'
+        required: false
+        default: 'data/history'
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install yfinance pandas numpy
+
+      - name: Fetch history
+        run: |
+          python scripts/fetch_history.py --out-dir "${{ github.event.inputs.out_dir || 'data/history' }}" \
+            ${{ github.event.inputs.symbols && format('--symbols {0}', github.event.inputs.symbols) || '' }}
+
+      - name: Show manifest
+        run: |
+          echo '## Exported symbols' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat "${{ github.event.inputs.out_dir || 'data/history' }}/manifest.csv" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: history-${{ github.run_id }}
+          path: |
+            ${{ github.event.inputs.out_dir || 'data/history' }}/*.csv
+            ${{ github.event.inputs.out_dir || 'data/history' }}/manifest.csv
+            ${{ github.event.inputs.out_dir || 'data/history' }}/*.pkl
+          if-no-files-found: error
