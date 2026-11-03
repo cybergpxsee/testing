@@ -40,6 +40,12 @@ STAGE1_PERIOD="${HERMES_SCAN_STAGE1_PERIOD:-1mo}"
 STAGE2_PERIOD="${HERMES_SCAN_STAGE2_PERIOD:-1y}"
 WORKER_STAGGER="${HERMES_SCAN_WORKER_STAGGER:-0.5}"
 MAX_SYMBOLS="${HERMES_SCAN_MAX_SYMBOLS:-}"
+SCANNER_MODULE="${SHELF_SCAN_MODULE:-retest_scan}"
+SHELF_SCAN_CHARTS="${SHELF_SCAN_CHARTS:-1}"
+case "$SCANNER_MODULE" in
+  us_pattern_scan|retest_scan) ;;
+  *) echo "SHELF_SCAN_MODULE must be us_pattern_scan or retest_scan (got: $SCANNER_MODULE)" >&2; exit 2 ;;
+esac
 
 export ROOT_DIR OUT_DIR RUN_DIR ARTIFACT_ROOT JSON_PATH MD_PATH COMBINED_STAGE1 COMBINED_STDERR
 export NASDAQ_LISTED_CACHE OTHER_LISTED_CACHE US_SYMBOLS_CACHE MONTHLY_EXCLUDED_JSON MANUAL_EXCLUDE_PATH UNIVERSE_SHARDS WORKER_CONCURRENCY PER_WORKER_STAGE2_SHARDS STAGE1_BATCH STAGE2_BATCH STAGE1_PERIOD STAGE2_PERIOD WORKER_STAGGER MAX_SYMBOLS
@@ -51,7 +57,8 @@ from pathlib import Path
 
 root = Path(os.environ['ROOT_DIR'])
 sys.path.insert(0, str(root))
-import us_pattern_scan as scan  # noqa: E402
+import importlib, os
+scan = importlib.import_module(os.environ.get("SCANNER_MODULE", "us_pattern_scan"))  # noqa: E402
 
 artifact_root = Path(os.environ['ARTIFACT_ROOT'])
 max_symbols_raw = os.environ.get('MAX_SYMBOLS', '').strip()
@@ -106,7 +113,8 @@ from pathlib import Path
 
 root = Path(os.environ['ROOT_DIR'])
 sys.path.insert(0, str(root))
-import us_pattern_scan as scan  # noqa: E402
+import importlib, os
+scan = importlib.import_module(os.environ.get("SCANNER_MODULE", "us_pattern_scan"))  # noqa: E402
 
 artifact_root = Path(os.environ['ARTIFACT_ROOT'])
 universe_shards = max(1, int(os.environ.get('UNIVERSE_SHARDS', '1')))
@@ -141,7 +149,8 @@ from types import SimpleNamespace
 
 root = Path(os.environ['ROOT_DIR'])
 sys.path.insert(0, str(root))
-import us_pattern_scan as scan  # noqa: E402
+import importlib, os
+scan = importlib.import_module(os.environ.get("SCANNER_MODULE", "us_pattern_scan"))  # noqa: E402
 
 worker_index = int(os.environ['WORKER_INDEX'])
 worker_total = int(os.environ.get('WORKER_TOTAL', '1'))
@@ -200,7 +209,7 @@ for local_shard_idx, shard_symbols in enumerate(scan.split_into_shards(liquid, p
         pickle.dump(stage2, f)
     # ===========================================
 
-    shard_results, shard_long, shard_short = scan.scan_stage2_dataset(stage2, mapped, str(stderr_path))
+    shard_results, shard_long, shard_short = (scan.scan_retest_dataset if os.environ.get('SCANNER_MODULE') == 'retest_scan' else scan.scan_stage2_dataset)(stage2, mapped, str(stderr_path))
     deep_scan_count += len(stage2)
     miss2.update(shard_miss)
     results.extend(shard_results)
@@ -273,7 +282,8 @@ from pathlib import Path
 
 root = Path(os.environ['ROOT_DIR'])
 sys.path.insert(0, str(root))
-import us_pattern_scan as scan  # noqa: E402
+import importlib, os
+scan = importlib.import_module(os.environ.get("SCANNER_MODULE", "us_pattern_scan"))  # noqa: E402
 
 worker_dirs = [Path(x) for x in os.environ['WORKER_DIRS_JOINED'].splitlines() if x.strip()]
 combined_stage1 = Path(os.environ['COMBINED_STAGE1'])

@@ -1,4 +1,4 @@
-﻿"""解析 Yahoo 过往股价 HTML 存档 -> OHLCV DataFrame（供点时回放用）。
+"""解析 Yahoo 过往股价 HTML 存档 -> OHLCV DataFrame（供点时回放用）。
 
 表格结构（繁体中文界面）：日期 | 開盤價 | 最高價 | 最低價 | 收盤價 | 調整結算價 | 成交量
 """
